@@ -1,0 +1,152 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>大画幅移轴对焦工作台</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<header>
+  <h1>大画幅移轴对焦工作台</h1>
+  <button id="btnRefocus" title="重新自动对焦">🎯 对焦</button>
+  <button id="btnSearch">🔍 搜索组合</button>
+  <button id="btnCard">🧾 调整卡</button>
+  <div class="sp"></div>
+  <button id="btnSave" class="primary">保存方案</button>
+  <button id="btnPlans">方案库</button>
+  <button id="btnReset" class="ghost">重置</button>
+</header>
+
+<div class="layout">
+  <!-- 左侧参数 -->
+  <aside class="sidebar">
+    <div class="section">
+      <h3>片幅与镜头</h3>
+      <div class="grid2">
+        <div class="fld"><label>片幅宽 mm</label><input type="number" id="film_w" step="1"></div>
+        <div class="fld"><label>片幅高 mm</label><input type="number" id="film_h" step="1"></div>
+        <div class="fld"><label>焦距 mm</label><input type="number" id="focal" step="1"></div>
+        <div class="fld"><label>光圈 f/</label><input type="number" id="aperture" step="0.5"></div>
+        <div class="fld"><label>镜头像场直径 mm</label><input type="number" id="image_circle" step="1"></div>
+        <div class="fld"><label>容许模糊圆 mm</label><input type="number" id="coc" step="0.01"></div>
+      </div>
+    </div>
+
+    <div class="section">
+      <h3>机械行程 / 限位</h3>
+      <div class="grid2">
+        <div class="fld"><label>皮腔最小 mm</label><input type="number" id="bellows_min" step="1"></div>
+        <div class="fld"><label>皮腔最大 mm</label><input type="number" id="bellows_max" step="1"></div>
+        <div class="fld"><label>轨道行程 mm</label><input type="number" id="rail_max" step="1"></div>
+        <div class="fld"><label>最小安全间距 mm</label><input type="number" id="min_clearance" step="1"></div>
+        <div class="fld"><label>俯仰限位 °</label><input type="number" id="max_tilt" step="0.5"></div>
+        <div class="fld"><label>摇摆限位 °</label><input type="number" id="max_swing" step="0.5"></div>
+        <div class="fld"><label>升降限位 mm</label><input type="number" id="max_rise" step="1"></div>
+        <div class="fld"><label>平移限位 mm</label><input type="number" id="max_shift" step="1"></div>
+      </div>
+    </div>
+
+    <div class="section">
+      <h3>锁定</h3>
+      <div class="lockrow" id="locks">
+        <label data-k="rear_x"><input type="checkbox">后组机位</label>
+        <label data-k="front_x"><input type="checkbox">前组机位</label>
+        <label data-k="rear_tilt"><input type="checkbox">后俯仰</label>
+        <label data-k="rear_swing"><input type="checkbox">后摇摆</label>
+        <label data-k="front_tilt"><input type="checkbox">前俯仰</label>
+        <label data-k="front_swing"><input type="checkbox">前摇摆</label>
+        <label data-k="rear_rise"><input type="checkbox">后升降</label>
+        <label data-k="rear_shift"><input type="checkbox">后平移</label>
+        <label data-k="front_rise"><input type="checkbox">前升降</label>
+        <label data-k="front_shift"><input type="checkbox">前平移</label>
+        <label data-k="composition"><input type="checkbox">构图边界</label>
+      </div>
+    </div>
+
+    <div class="section">
+      <h3>主体平面 / 对焦点</h3>
+      <table class="pts">
+        <thead><tr><th>名称</th><th>x</th><th>y</th><th>z</th><th>类型</th><th></th></tr></thead>
+        <tbody id="ptsBody"></tbody>
+      </table>
+      <div class="rowline" style="margin-top:6px">
+        <button id="addFocus">+ 对焦点</button>
+        <button id="addComp">+ 构图点</button>
+      </div>
+      <div class="fld" style="margin-top:6px">
+        <label>自动对焦锚点</label>
+        <select id="focusAnchor"></select>
+      </div>
+      <label style="font-size:11px;color:var(--dim)">
+        <input type="checkbox" id="autoFocus" checked> 调整时自动重对焦
+      </label>
+    </div>
+
+    <div class="section">
+      <h3>数值微调</h3>
+      <div class="tabs">
+        <button id="tabRear" class="on">后组(片盒)</button>
+        <button id="tabFront">前组(镜头)</button>
+      </div>
+      <div id="nudges" class="grid2"></div>
+    </div>
+  </aside>
+
+  <!-- 右侧视图 + 底栏 -->
+  <div class="main">
+    <div class="views">
+      <div class="view-wrap">
+        <div class="view-title">侧视图 (x–z，高度方向)</div>
+        <svg id="sideSvg" viewBox="0 0 800 600" preserveAspectRatio="xMidYMid meet"></svg>
+        <div class="legend">
+          <span><i style="background:var(--rear)"></i>后组</span>
+          <span><i style="background:var(--front)"></i>前组</span>
+          <span><i style="background:var(--plane)"></i>焦平面</span>
+          <span><i style="background:var(--hinge)"></i>铰链线</span>
+          <span><i style="background:#2f6f4f"></i>景深楔形</span>
+        </div>
+      </div>
+      <div class="view-wrap">
+        <div class="view-title">俯视图 (x–y，水平方向)</div>
+        <svg id="topSvg" viewBox="0 0 800 600" preserveAspectRatio="xMidYMid meet"></svg>
+        <div class="legend">
+          <span><i style="background:var(--rear)"></i>后组</span>
+          <span><i style="background:var(--front)"></i>前组</span>
+          <span><i style="background:var(--plane)"></i>焦平面</span>
+          <span><i style="background:var(--hinge)"></i>铰链线</span>
+        </div>
+      </div>
+    </div>
+
+    <div class="bottombar">
+      <div class="warnings">
+        <h3 style="font-size:11px;color:var(--dim);margin:0 0 6px;text-transform:uppercase">检查与警告（点击定位机件）</h3>
+        <div id="warnList"></div>
+      </div>
+      <div class="metrics">
+        <h3 style="font-size:11px;color:var(--dim);margin:0 0 6px;text-transform:uppercase">实时几何</h3>
+        <div class="m">
+          <div class="metric"><b id="m_ext">–</b><span>像距/光轴伸长 mm</span></div>
+          <div class="metric"><b id="m_eff">–</b><span>有效光圈 f/</span></div>
+          <div class="metric"><b id="m_blur">–</b><span>最大模糊圆 mm</span></div>
+          <div class="metric"><b id="m_ic">–</b><span>像场余量 mm</span></div>
+          <div class="metric"><b id="m_clear">–</b><span>前后组间距 mm</span></div>
+          <div class="metric"><b id="m_hinge">–</b><span>铰链距离 mm</span></div>
+          <div class="metric"><b id="m_bell">–</b><span>板距(皮腔) mm</span></div>
+          <div class="metric"><b id="m_mag">–</b><span>放大率</span></div>
+        </div>
+      </div>
+      <div class="candidates">
+        <h3 style="font-size:11px;color:var(--dim);margin:0 0 6px;text-transform:uppercase">候选组合（点击叠加比较）</h3>
+        <div id="candList"><div style="color:var(--dim);font-size:11px">点击顶部「搜索组合」生成</div></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="plans-pop" id="plansPop"></div>
+<div class="flash" id="flash"></div>
+<script src="/static/app.js"></script>
+</body>
+</html>

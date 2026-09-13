@@ -109,24 +109,28 @@ def conjugate_plane_rear(p_R, R, p_F, L, f):
          vdot(vsub(p_R, p_F), u_R),
          vdot(vsub(p_R, p_F), r_R)]
     cx = c[0]
-    # 后组平面 (q-c)·ex=0 经 homography X'=F-f/(d-f)(X-F) 的共轭:
-    # (f+cx bx) qx + cx by qy + cx bz qz = f cx
+    # 像面约束 λ qx = cx, λ=-f/(q·b-f)=f/(f-q·b) (像在镜头 -n 侧, cx<0):
+    # f qx = cx(f-q·b)  =>  (f+cx bx) qx + cx by qy + cx bz qz = f cx
     A = f + cx * b[0]
     B = cx * b[1]
     C = cx * b[2]
     D = f * cx
-    e = -vdot(vsub(p_R, p_F), n_L)   # 沿镜头光轴的伸长
+    e = -vdot(vsub(p_R, p_F), n_L)   # 沿镜头光轴的伸长(正值)
     return (A, B, C, D), b, c, e
 
 
 def world_plane(abcd, R, p_F):
-    """后组坐标平面 -> 世界平面 (n,d): n·X=d。"""
+    """后组坐标平面 -> 世界平面 (n,d): n·X=d。退化时返回竖直基准面。"""
     n_R, u_R, r_R = R
     A, B, C, D = abcd
     n = vadd(vadd(vscl(n_R, A), vscl(u_R, B)), vscl(r_R, C))
     nn = vnorm(n)
+    if nn < 1e-12:
+        # 退化(如伸长恰等于焦距的数学极端): 回退为过镜头的竖直面
+        n = [1.0, 0.0, 0.0]
+        nn = 1.0
     n = vscl(n, 1.0 / nn)
-    d = (vdot(n, p_F) + D / nn)
+    d = vdot(n, p_F) + D / nn
     return n, d
 
 
@@ -155,21 +159,24 @@ def autofocus(state):
           vdot(vsub(Q, p_F0), u_R),
           vdot(vsub(Q, p_F0), r_R)]
     b = [vdot(n_L, n_R), vdot(n_L, u_R), vdot(n_L, r_R)]
-    # 共轭平面: (f+cx b0)qx + cx B = f cx, cx=c0x-Δ, qx=q0x-Δ
+    # 共轭平面 (f+cx b0)qx+cx(by q0y+bz q0z)=f cx;
+    # cx=c0x-Δ, qx=q0x-Δ, B=by q0y+bz q0z。展开(Δ 的一次项含 f 抵消):
     B = b[1] * q0[1] + b[2] * q0[2]
-    # b0 Δ² - Δ(f+c0x b0+b0 q0x+B) + f q0x+c0x(B-f)=0
+    # b0 Δ² - Δ(c0x b0+b0 q0x+B) + (f q0x+c0x b0 q0x+c0x B-f c0x)=0
     aa = b[0]
-    bb = -(f + c0[0] * b[0] + b[0] * q0[0] + B)
-    cc = f * q0[0] + c0[0] * (B - f)
+    bb = -(c0[0] * b[0] + b[0] * q0[0] + B)
+    cc = f * q0[0] + c0[0] * (b[0] * q0[0] + B - f)
     disc = bb * bb - 4 * aa * cc
     roots = []
     if disc >= 0:
         s = math.sqrt(disc)
         for Δ in ((-bb + s) / (2 * aa), (-bb - s) / (2 * aa)):
+            if not (Δ > 0):          # 前组必须在后组前方
+                continue
             p_F = [p_R[0] + Δ, p_F0[1], p_F0[2]]
             ξ = vdot(vsub(Q, p_F), n_L)
             e = -vdot(vsub(p_R, p_F), n_L)
-            if ξ > f * 0.25 and e > f * 0.3:
+            if ξ > f and cam["bellows_min"] * 0.5 < e < cam["bellows_max"] * 1.5:
                 roots.append(Δ)
     if roots:
         # 选离当前前组位置最近的物理解, 保证拖动连续
@@ -182,12 +189,11 @@ def autofocus(state):
 
 # ---------------- 像点 / 虚焦圆 ----------------
 def image_point(Q, p_F, n_L, f):
-    """薄透镜 homography: X' = F - f/(d-f)(Q-F), d=(Q-F)·n_L。"""
+    """薄透镜 homography: X' = F + λ(Q-F), λ=f/(f-d), d=(Q-F)·n_L。"""
     d = vdot(vsub(Q, p_F), n_L)
-    if abs(d - f) < 1e-9:
+    if abs(f - d) < 1e-9:
         return None
-    lam = -f / (d - f)
-    return vadd(p_F, vscl(vsub(Q, p_F), lam))
+    return vadd(p_F, vscl(vsub(Q, p_F), f / (f - d)))
 
 
 def blur_diameter(Q, p_R, R, p_F, L, f, aperture_diam, samples=16):
@@ -616,84 +622,179 @@ def smallest_eigenvector(A):
 
 
 # ---------------- 构造性求解: 给定目标平面与前组姿态, 反求后组/位移 ----------------
-def construct_pose(cam, target_n, target_d, n_L, base_pose, locks,
-                   comp_points=None):
+def _solve3(A, b):
+    """3x3 Gauss 消元, 奇异返回 None。"""
+    M = [A[i][:] + [b[i]] for i in range(3)]
+    for col in range(3):
+        piv = max(range(col, 3), key=lambda r: abs(M[r][col]))
+        if abs(M[piv][col]) < 1e-14:
+            return None
+        M[col], M[piv] = M[piv], M[col]
+        for r in range(col + 1, 3):
+            f_ = M[r][col] / M[col][col]
+            for k in range(col, 4):
+                M[r][k] -= f_ * M[col][k]
+    x = [0.0, 0.0, 0.0]
+    for i in range(2, -1, -1):
+        s = M[i][3] - sum(M[i][j] * x[j] for j in range(i + 1, 3))
+        if abs(M[i][i]) < 1e-14:
+            return None
+        x[i] = s / M[i][i]
+    return x
+
+
+def construct_from_points(cam, Qs, n_L, F, Rframe, want_n=None):
     """
-    给定目标焦平面 m·X=d(m 指向相机一侧, h=d-m·F 为镜头到平面的有符号距离)、
-    前组法线 n_L, 反求后组姿态与伸长。
-    闭式关系(镜头坐标):
-      w = m-(m·n_L)n_L ; sinα=(f/h)|w| ; bx=sqrt(1-sin^2)
-      n_R = (n_L-(f/h)w)/bx
-      c_x = h / (m_x-(h/f)bx)   (后组原点在镜头坐标沿 n_R 的分量, h>0)
-    构图: 片幅横向偏移 c_y,c_z 取主体点像在片上坐标均值。
+    前组(F,n_L)、后组框架 Rframe 已定时, 最小二乘解 cx 使 Qs 落在共轭焦
+    平面上, cy/cz 用像点对中。共轭平面:
+      (f+cx b0)qx+cx b1 qy+cx b2 qz = f cx
+    返回 (pose, residual, cx) 或 None。
     """
     f = cam["focal"]
-    n_L, u_L, r_L = build_frame_from_n(n_L)
-    tF, sF = frame_to_tilt_swing(n_L)
-    bf, bs = base_pose["front"], base_pose["rear"]
-
-    Fy = bf["shift"] if locks.get("front_shift") else 0.0
-    Fz = bf["rise"] if locks.get("front_rise") else 0.0
-    xr = bs["x"] if locks.get("rear_x") else 0.0
-    Fx_fixed = bf["x"] if locks.get("front_x") else None
-    pts = comp_points or []
-
-    Fx = Fx_fixed if Fx_fixed is not None else (xr + f)
-    p_R = None
-    for _ in range(40):
-        F = [Fx, Fy, Fz]
-        h = target_d - vdot(target_n, F)
-        if abs(h) < 1e-6:
-            return None
-        w = vsub(target_n, vscl(n_L, vdot(target_n, n_L)))
-        sin_a = (f / h) * math.sqrt(vdot(w, w))
-        if sin_a >= 1.0 - 1e-9:
-            return None
-        bx = math.sqrt(max(0.0, 1 - sin_a * sin_a))
-        n_R = vunit(vsub(n_L, vscl(w, f / h / max(bx, 1e-12))))
-        _, u_R, r_R = build_frame_from_n(n_R)
-        r_R = vcross(n_R, u_R)
-        mR = [vdot(target_n, n_R), vdot(target_n, u_R), vdot(target_n, r_R)]
-
-        cy = cz = 0.0
-        if pts:
-            sy = sz = 0.0
-            for p in pts:
-                Q = [p["x"], p["y"], p["z"]]
-                Xp = image_point(Q, F, n_L, f)
-                if Xp is None:
-                    continue
-                rel = vsub(Xp, F)
-                sy += vdot(rel, u_R)
-                sz += vdot(rel, r_R)
-            cy, cz = sy / len(pts), sz / len(pts)
-        cy = clamp(cy, -cam["max_shift"] - 2, cam["max_shift"] + 2)
-        cz = clamp(cz, -cam["max_rise"] - 2, cam["max_rise"] + 2)
-
-        den = mR[0] - (h / f) * bx
-        if abs(den) < 1e-12:
-            return None
-        cx = h / den
-        p_R = vadd(vadd(vadd(F, vscl(n_R, cx)), vscl(u_R, cy)), vscl(r_R, cz))
-        if Fx_fixed is not None:
-            if locks.get("rear_x") and abs(p_R[0] - xr) > 2.0:
-                return None
-            break
-        Fx_new = Fx + (xr - p_R[0])
-        if abs(Fx_new - Fx) < 1e-7:
-            Fx = Fx_new
-            break
-        Fx = 0.5 * Fx + 0.5 * Fx_new
-    if p_R is None:
+    n_R, u_R, r_R = Rframe
+    b = [vdot(n_L, n_R), vdot(n_L, u_R), vdot(n_L, r_R)]
+    acc = 0.0
+    rhs = 0.0
+    qlist = []
+    for Q in Qs:
+        v = vsub(Q, F)
+        q = [vdot(v, n_R), vdot(v, u_R), vdot(v, r_R)]
+        qlist.append(q)
+        # cx (b·q - f) = -f qx
+        coef = b[0] * q[0] + b[1] * q[1] + b[2] * q[2] - f
+        acc += coef * coef
+        rhs += coef * (-f * q[0])
+    if want_n is not None:
+        mR = [vdot(want_n, n_R), vdot(want_n, u_R), vdot(want_n, r_R)]
+        w = f * 50.0
+        # 法线平行: A mRy - B mRx = 0, A=f+cx b0, B=cx b1
+        for (a0, c0) in ((w * (b[0] * mR[1] - b[1] * mR[0]), -w * f * mR[1]),
+                         (w * (b[0] * mR[2] - b[2] * mR[0]), -w * f * mR[2])):
+            acc += a0 * a0
+            rhs += a0 * c0
+    if acc < 1e-18:
         return None
+    cx = rhs / acc
+    if cx >= -1e-6:
+        return None
+    cy = cz = 0.0
+    sy = sz = cnt = 0
+    for Q in Qs:
+        Xp = image_point(Q, F, n_L, f)
+        if Xp is None:
+            continue
+        rel = vsub(Xp, F)
+        sy += vdot(rel, u_R)
+        sz += vdot(rel, r_R)
+        cnt += 1
+    if cnt:
+        cy, cz = sy / cnt, sz / cnt
+    cy = clamp(cy, -cam["max_shift"] - 2, cam["max_shift"] + 2)
+    cz = clamp(cz, -cam["max_rise"] - 2, cam["max_rise"] + 2)
+    res = 0.0
+    for q in qlist:
+        lhs = (f + cx * b[0]) * q[0] + cx * b[1] * q[1] + cx * b[2] * q[2] - f * cx
+        res = max(res, abs(lhs))
+    p_R = vadd(vadd(vadd(F, vscl(n_R, cx)), vscl(u_R, cy)), vscl(r_R, cz))
     tR, sR = frame_to_tilt_swing(n_R)
-    return {
+    tF, sF = frame_to_tilt_swing(n_L)
+    pose = {
         "rear":  {"x": p_R[0], "tilt": tR, "swing": sR,
                   "rise": p_R[2], "shift": p_R[1]},
         "front": {"x": F[0], "tilt": tF, "swing": sF,
-                  "rise": Fz, "shift": Fy},
+                  "rise": F[2], "shift": F[1]},
         "focus_mode": "manual", "focus_anchor": 0,
     }
+    return pose, res, cx
+
+
+def construct_pose(cam, target_n, target_d, n_L, base_pose, locks,
+                   comp_points=None):
+    """
+    固定前组法线/横向, 在后组 (tilt,swing) 角度空间由粗到细下山搜索,
+    每组角度 LS 解伸长, 使目标焦平面 m·X=d 通过主体点。
+    """
+    f = cam["focal"]
+    n_L, u_L, r_L = build_frame_from_n(n_L)
+    bf, bs = base_pose["front"], base_pose["rear"]
+    Fy = bf["shift"] if locks.get("front_shift") else 0.0
+    Fz = bf["rise"] if locks.get("front_rise") else 0.0
+    xr = bs["x"] if locks.get("rear_x") else 0.0
+
+    Qs = [[p["x"], p["y"], p["z"]] for p in (comp_points or [])]
+    if not Qs:
+        return None
+    mL0 = vdot(target_n, n_L)
+    if abs(mL0) < 1e-9:
+        return None
+    Fx0 = bf["x"] if locks.get("front_x") else xr + f
+
+    def eval_angle(t, s):
+        Rf = frame(t, s)
+        Fbase = [Fx0, Fy, Fz]
+        xi = (target_d - vdot(target_n, Fbase)) / mL0
+        if xi <= f * 1.05 or xi > 1e6:
+            return None
+        if locks.get("front_x"):
+            Ftry = Fbase
+        else:
+            e = f * xi / (xi - f)
+            Ftry = [xr + e, Fy, Fz]
+        got = construct_from_points(cam, Qs, n_L, Ftry, Rf, target_n)
+        if got is None:
+            return None
+        pose, res, cx = got
+        e_ax = -cx * vdot(n_L, Rf[0])
+        if not (cam["bellows_min"] * 0.4 < e_ax < cam["bellows_max"] * 1.2):
+            return None
+        if abs(pose["rear"]["tilt"]) > cam["max_tilt"] + 0.5 or \
+           abs(pose["rear"]["swing"]) > cam["max_swing"] + 0.5:
+            return None
+        return res, pose
+
+    rng = cam["max_tilt"]
+    # 有效倾斜方向: 目标法线在镜头系的横向分量
+    # u_L≈世界 z(高度) -> 俯仰; r_L≈世界 y(左右) -> 摇摆
+    mLy = vdot(target_n, u_L)
+    mLz = vdot(target_n, r_L)
+    ml = math.hypot(mLy, mLz)
+    dir_t = -mLy / ml if ml > 1e-9 else 1.0
+    dir_s = -mLz / ml if ml > 1e-9 else 0.0
+
+    best = None
+    ct = cs = 0.0
+    # 第一轮: 沿有效方向粗扫
+    coarse = [round(-rng + i * 4.0, 3) for i in range(int(2 * rng / 4.0) + 1)]
+    lb = None
+    for mag in coarse:
+        r = eval_angle(dir_t * mag, dir_s * mag)
+        if r is not None and (lb is None or r[0] < lb[0]):
+            lb = (r[0], r[1], dir_t * mag, dir_s * mag)
+    if lb is not None:
+        best = lb
+        ct, cs = best[2], best[3]
+    # 细化: 二维小窗
+    for step in (1.0, 0.2, 0.05):
+        lb = None
+        half = 2
+        for dt_i in range(-half, half + 1):
+            for ds_i in range(-half, half + 1):
+                t = ct + dt_i * step
+                s = cs + ds_i * step
+                r = eval_angle(t, s)
+                if r is not None and (lb is None or r[0] < lb[0]):
+                    lb = (r[0], r[1], t, s)
+        if lb is not None and (best is None or lb[0] < best[0]):
+            best = lb
+        if best is not None:
+            ct, cs = best[2], best[3]
+    if best is None:
+        return None
+    pose = best[1]
+    if locks.get("rear_x"):
+        pose["rear"]["x"] = xr
+    return pose
+
 
 
 # ---------------- 搜索 ----------------
@@ -875,3 +976,28 @@ def json_like(state, cand):
     st = copy.deepcopy(state)
     st["pose"] = cand
     return st
+
+
+# ---------------- 直接运行: 自检 ----------------
+if __name__ == "__main__":
+    import sys
+    if "--selftest" in sys.argv:
+        st = default_state()
+        autofocus(st)
+        r = compute(st)
+        print("默认状态: 前组 x=%.1f, 伸长=%.1f mm, 最大模糊圆=%.4f mm, 警告 %d 条"
+              % (st["pose"]["front"]["x"], r["extension"], r["max_blur"],
+                 len(r["warnings"])))
+        # 回归: 单点 x=1000 不应除零
+        s2 = default_state()
+        s2["points"] = [{"name": "A", "x": 1000.0, "y": 0, "z": 0, "kind": "focus"}]
+        autofocus(s2)
+        r2 = compute(s2)
+        assert r2["subject_plane"]["n"] is not None
+        print("单点回归: front.x=%.2f, blur=%.6f (通过)"
+              % (s2["pose"]["front"]["x"], r2["max_blur"]))
+        print("自检通过。")
+    else:
+        print("大画幅移轴相机几何内核。这是计算模块, 不是 Web 入口。")
+        print("请启动工作台:  python3 app.py   然后访问 http://127.0.0.1:5000")
+        print("几何自检:      python3 camera_geometry.py --selftest")
