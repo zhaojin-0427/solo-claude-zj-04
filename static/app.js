@@ -489,6 +489,7 @@ function startDrag(e) {
   drag = {
     type: t.dataset.drag, which: t.dataset.which, kind, svg,
     lastX: e.clientX, lastY: e.clientY,
+    startX: e.clientX, startY: e.clientY,
     orig: JSON.parse(JSON.stringify(STATE.pose)),
     pointIndex: t.dataset.i != null ? parseInt(t.dataset.i, 10) : null,
     sid: t.dataset.sid != null ? parseInt(t.dataset.sid, 10) : null,
@@ -505,9 +506,10 @@ function startDrag(e) {
 }
 
 function viewPoint(kind, x, v) {
-  // 侧视图勾画: 给定 x 与 z; 俯视图: x 与 y, 其余坐标取被选主体/原点
-  if (kind === "side") return [x, 0, v];
-  return [x, v, 0];
+  // 侧视图勾画: 给定 x 与 z; 俯视图: x 与 y, 其余坐标取 0。
+  // 返回 {x,y,z} 对象, 与视图投影 P(p) 的字段访问保持一致。
+  if (kind === "side") return { x, y: 0, z: v };
+  return { x, y: v, z: 0 };
 }
 
 let dragScheduled = false;
@@ -531,9 +533,9 @@ async function moveDrag(e) {
   dragScheduled = true;
   requestAnimationFrame(async () => {
     dragScheduled = false;
-    const dxPx = e.clientX - drag.lastX;
-    const dyPx = e.clientY - drag.lastY;
-    drag.lastX = e.clientX; drag.lastY = e.clientY;
+    // 自按下点累计的总位移, 每帧从原始姿态重算, 完整保留连续拖动
+    const dxPx = e.clientX - drag.startX;
+    const dyPx = e.clientY - drag.startY;
     if (drag.type === "point") {
       const w = screenToWorld(drag.svg, drag.kind, e.clientX, e.clientY);
       const p = STATE.points[drag.pointIndex];
@@ -575,9 +577,23 @@ function applySubjectEndDrag(ev) {
     const other = sub.pts[idx === 0 ? 1 : 0];
     other[2] = q[2];
   } else {
-    // 矩形对角点: 保持竖直立面, 视情况允许两个对角各自自由
-    if (drag.kind === "side") { q[0] = Math.max(1, w.x); q[1] = o[1]; q[2] = w.v; }
-    else { q[0] = Math.max(1, w.x); q[1] = w.v; q[2] = o[2]; }
+    // 竖直矩形立面: 存储对角 A=pts[0](左下), C=pts[1](右上),
+    // 派生 B=右下(C.x,C.y,A.z), D=左上(A.x,A.y,C.z)。
+    // 拖派生角点时, 把新 (x,z) 或 (x,y) 拆回 A/C 对应坐标分量。
+    const A = sub.pts[0], C = sub.pts[1];
+    if (drag.kind === "side") {
+      // 侧视给 (x,z); y 保持原值, 以对角原值为基准拆分
+      if (idx === 0) { A[0] = Math.max(1, w.x); A[2] = w.v; }
+      else if (idx === 2) { C[0] = Math.max(1, w.x); C[2] = w.v; }
+      else if (idx === 1) { C[0] = Math.max(1, w.x); A[2] = w.v; }   // B
+      else { A[0] = Math.max(1, w.x); C[2] = w.v; }                  // D
+    } else {
+      // 俯视给 (x,y)
+      if (idx === 0) { A[0] = Math.max(1, w.x); A[1] = w.v; }
+      else if (idx === 2) { C[0] = Math.max(1, w.x); C[1] = w.v; }
+      else if (idx === 1) { C[0] = Math.max(1, w.x); C[1] = w.v; }   // B 同 C
+      else { A[0] = Math.max(1, w.x); A[1] = w.v; }                  // D 同 A
+    }
   }
 }
 
@@ -596,7 +612,8 @@ function applySubjectMoveDrag(ev, dxPx, dyPx) {
   });
 }
 
-// 增量拖拽: 水平像素 -> 轨道; 垂直像素 -> 倾角(0.15°/px); Shift+垂直 -> 升降/平移
+// 累计拖拽(自按下点): 水平像素 -> 轨道; 垂直像素 -> 倾角(0.15°/px);
+// Shift+垂直 -> 升降/平移。每帧从 orig 姿态重算, 连续多段不丢位移。
 function applyStandardDrag(ev, dxPx, dyPx) {
   const which = drag.which, kind = drag.kind;
   const std = STATE.pose[which];
@@ -632,8 +649,8 @@ function endDrag(e) {
   if (drawing) {
     const d = drawing;
     drawing = null;
-    const dist = Math.hypot(d.cur[0] - d.start[0],
-      d.kind === "side" ? d.cur[2] - d.start[2] : d.cur[1] - d.start[1]);
+    const dist = Math.hypot(d.cur.x - d.start.x,
+      d.kind === "side" ? d.cur.z - d.start.z : d.cur.y - d.start.y);
     if (dist > 30) commitSubject(d);
     else { drawView("sideSvg", "side"); drawView("topSvg", "top"); }
     return;
@@ -647,24 +664,26 @@ function endDrag(e) {
 }
 
 function commitSubject(d) {
-  let a = d.start.slice(), b = d.cur.slice();
+  const a0 = [d.start.x, d.start.y, d.start.z];
+  const b0 = [d.cur.x, d.cur.y, d.cur.z];
+  let A = a0.slice(), B = b0.slice();
   let type = d.tool;
   let mustKeep = false;
   if (d.tool === "keep") { type = "rect"; mustKeep = true; }
   if (type === "vline") {
-    // 竖直: 上端 z 大
-    if (b[2] < a[2]) [a, b] = [b, a];
-    b[0] = a[0]; b[1] = a[1];
+    // 竖直: 上端 z 大; 两端 x,y 相同
+    if (B[2] < A[2]) [A, B] = [B, A];
+    B[0] = A[0]; B[1] = A[1];
   } else if (type === "hline") {
-    if (b[0] < a[0]) [a, b] = [b, a];
-    b[2] = a[2];
+    if (B[0] < A[0]) [A, B] = [B, A];
+    B[2] = A[2];
   } else {
     // 矩形: A 左下 (z 小), C 右上 (z 大)
-    if (b[2] < a[2]) [a, b] = [b, a];
+    if (B[2] < A[2]) [A, B] = [B, A];
   }
   const id = (STATE.subjects.reduce((m, s) => Math.max(m, s.id || 0), 0) || 0) + 1;
   const typeName = { vline: "竖线", hline: "横线", rect: "矩形" }[type];
-  const sub = { id, type, name: typeName + id, must_keep: mustKeep, pts: [a, b] };
+  const sub = { id, type, name: typeName + id, must_keep: mustKeep, pts: [A, B] };
   STATE.subjects.push(sub);
   selectedSubjectId = id;
   drawTool = ""; updateToolButtons();
@@ -767,24 +786,51 @@ function renderGroundGlassPanel(gg) {
   const cropCls = gg.min_margin != null && gg.min_margin < gg.keep_margin
     ? "badval" : "goodval";
   sum.innerHTML = `
-    <span>越界/异常<b class="${gg.violations ? "badval" : "goodval"}">${gg.violations}</b></span>
+    <span>异常对象<b class="${gg.violations ? "badval" : "goodval"}">${gg.violations}</b></span>
     <span>最大透视<b class="${perspCls}">${gg.max_persp.toFixed(1)}</b></span>
     <span>裁切余量 mm<b class="${cropCls}">${crop}</b></span>
-    <span>留边 mm<b>${gg.keep_margin.toFixed(0)}</b></span>`;
+    <span>留边 mm<b>${gg.keep_margin.toFixed(0)}</b></span>
+    <span>容差<b>${gg.persp_tol.toFixed(1)}</b></span>`;
 
-  // 异常列表(点选回到对应主体)
+  // 逐对象始终显示名称与各项指标; 无指标的类型显示 –
   const box = $("ggIssues");
   box.innerHTML = "";
-  if (!gg.issues.length) {
-    box.innerHTML = '<div style="color:var(--good);font-size:11px;padding:4px">✓ 主体构图全部正常</div>';
+  if (!gg.subjects.length) {
+    box.innerHTML = '<div style="color:var(--dim);font-size:11px;padding:4px">尚未勾画主体</div>';
     return;
   }
-  gg.issues.forEach((it) => {
-    const d = document.createElement("div");
-    d.className = "gg-item " + (it.level === "critical" ? "critical" : "");
-    d.innerHTML = `${it.msg}<div class="sub">点击定位到主体</div>`;
-    d.onclick = () => locateSubject(it.subject_id);
-    box.appendChild(d);
+  gg.subjects.forEach((s) => {
+    const row = document.createElement("div");
+    row.className = "gg-subjrow" + (s.id === selectedSubjectId ? " sel" : "");
+    const bad = s.issues.some(i => i.level === "critical");
+    const warn = s.issues.length > 0 && !bad;
+    const title = s.issues.length ? s.issues.map(i => i.msg).join("\n")
+                                  : "各项指标正常";
+    const chip = (label, val, unit, cls) =>
+      `<span class="chip ${cls || ""}"><em>${label}</em><b>${val}</b>${unit || ""}</span>`;
+    const m = s.metrics || {};
+    const conv = m.convergence != null ? m.convergence : m.v_converge;
+    const typeNm = { vline: "竖线", hline: "横线", rect: "矩形" }[s.type] || "";
+    row.title = title;
+    row.innerHTML = `
+      <div class="gs-head ${bad ? "badval" : warn ? "warnval" : "goodval"}">
+        ${s.must_keep ? "🔒 " : ""}<span class="gs-name">${escapeHtml(s.name)}</span>
+        <span class="gs-type">${typeNm}${s.clipped ? " · 裁切" : ""}</span>
+      </div>
+      <div class="gs-chips">
+        ${chip("裁切余量", m.edge_margin != null ? m.edge_margin.toFixed(1) : "–", "mm",
+               m.edge_margin != null && m.edge_margin < gg.keep_margin ? "c-bad" : "")}
+        ${chip("竖线汇聚", conv != null ? conv.toFixed(2) : "–", "°",
+               conv != null && conv > gg.persp_tol ? "c-warn" : "")}
+        ${chip("横线倾斜", m.h_tilt != null ? m.h_tilt.toFixed(2) : "–", "°",
+               m.h_tilt != null && m.h_tilt > gg.persp_tol ? "c-warn" : "")}
+        ${chip("梯形畸变", m.keystone != null ? m.keystone.toFixed(1) : "–", "%",
+               m.keystone != null && m.keystone > gg.persp_tol ? "c-warn" : "")}
+        ${chip("边缘放大率差", m.mag_spread != null ? m.mag_spread.toFixed(1) : "–", "%",
+               m.mag_spread != null && m.mag_spread > gg.persp_tol ? "c-warn" : "")}
+      </div>`;
+    row.onclick = () => locateSubject(s.id);
+    box.appendChild(row);
   });
 }
 

@@ -433,11 +433,11 @@ def analyze_subject(sub, proj, tol_deg, margin, w, h):
             issues.append({"code": "keystone", "level": "warn",
                            "msg": "%s：梯形畸变 %.1f%%（容差 %.1f%%）"
                                   % (sub.get("name", ""), keystone, tol_deg)})
-        # 竖边汇聚(矩形两竖边互不平行的夹角)
-        if P[0] and P[1] and P[3] and P[2]:
-            a1 = _seg_angle(P[0], P[1])
-            a2 = _seg_angle(P[3], P[2])
-            d = abs(a1 - a2) % 180
+        # 竖边汇聚: 左竖边 A-D 与右竖边 B-C 的夹角(勿与横边 A-B/D-C 混淆)
+        if P[0] and P[3] and P[1] and P[2]:
+            a_left = _seg_angle(P[0], P[3])
+            a_right = _seg_angle(P[1], P[2])
+            d = abs(a_left - a_right) % 180
             d = min(d, 180 - d)
             metrics["v_converge"] = d
             if d > tol_deg:

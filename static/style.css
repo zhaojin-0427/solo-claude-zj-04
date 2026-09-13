@@ -70,6 +70,23 @@ button.danger { color: var(--bad); }
   display: flex; gap: 10px; flex-wrap: wrap; font-size: 10px; color: var(--dim); }
 .gg-summary b { display: block; font-size: 13px; color: var(--txt); }
 .gg-issues { flex: 1; overflow-y: auto; padding: 5px 8px; }
+.gg-subjrow { border: 1px solid var(--line); border-radius: 5px; padding: 4px 6px;
+  margin-bottom: 5px; cursor: pointer; background: var(--panel2); }
+.gg-subjrow:hover { filter: brightness(1.18); }
+.gg-subjrow.sel { border-color: var(--accent); }
+.gg-subjrow .gs-head { font-size: 11px; font-weight: 600; display: flex;
+  justify-content: space-between; gap: 6px; margin-bottom: 3px; }
+.gg-subjrow .gs-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.gg-subjrow .gs-type { color: var(--dim); font-weight: 400; font-size: 10px; flex: none; }
+.gg-subjrow .gs-chips { display: flex; flex-wrap: wrap; gap: 3px; }
+.gg-subjrow .chip { display: inline-flex; align-items: baseline; gap: 2px;
+  border: 1px solid var(--line); border-radius: 8px; padding: 0 6px; font-size: 10px; }
+.gg-subjrow .chip em { font-style: normal; color: var(--dim); }
+.gg-subjrow .chip b { font-size: 11px; font-weight: 600; }
+.gg-subjrow .chip.c-warn { border-color: var(--warn); }
+.gg-subjrow .chip.c-warn b { color: var(--warn); }
+.gg-subjrow .chip.c-bad { border-color: var(--bad); }
+.gg-subjrow .chip.c-bad b { color: var(--bad); }
 .gg-item { font-size: 11px; padding: 3px 6px; margin-bottom: 3px; border-radius: 4px;
   cursor: pointer; border-left: 3px solid var(--warn); background: rgba(232,176,75,.10); }
 .gg-item.critical { border-left-color: var(--bad); background: rgba(239,106,94,.12); }

@@ -87,6 +87,10 @@ assert abs(gg5["ic_ellipse"]["rx"] - gg5["ic_ellipse"]["ry"]) < 0.5
 # 正对立面上的竖线应平行(汇聚≈0)
 v = [s for s in gg5["subjects"] if s["type"] == "vline"][0]
 assert v["metrics"].get("convergence", 0) < 0.5, v["metrics"]
+# 矩形竖边汇聚必须基于真竖边 A-D / B-C: 无倾角正对时应为 0,
+# 不能取横边 A-B / D-C 的夹角(此前会误报 ~6°)
+rect0 = [s for s in gg5["subjects"] if s["type"] == "rect"][0]
+assert rect0["metrics"].get("v_converge", 0) < 0.05, rect0["metrics"]
 # 矩形有 4 条片上折线段(未被虚像剔除)
 rect = [s for s in gg5["subjects"] if s["type"] == "rect"][0]
 assert len(rect["segs"]) == 4, len(rect["segs"])
