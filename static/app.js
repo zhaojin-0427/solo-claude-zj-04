@@ -7,6 +7,11 @@ let activeTab = "rear";
 let compareCandidates = [];   // 叠加比较的候选
 let searchCandidates = [];
 let flashTimer = null;
+let drawTool = "";            // "", "vline","hline","rect","keep"
+let drawing = null;           // {kind, pts}
+let selectedSubjectId = null;
+let ggInvert = true;
+let lastSubjSig = "";
 
 const $ = (id) => document.getElementById(id);
 const NS = "http://www.w3.org/2000/svg";
@@ -45,11 +50,13 @@ function flash(msg) {
 /* ---------------- 初始化 ---------------- */
 async function init() {
   STATE = await api("/api/default");
+  ggInvert = true;
   bindInputs();
   bindLocks();
   bindPoints();
   bindViews();
   bindHeader();
+  bindSubjectUI();
   syncControls();
   await recompute(true);
 }
@@ -81,6 +88,15 @@ function bindInputs() {
     STATE.pose.focus_anchor = parseInt(e.target.value, 10) || 0;
     recompute();
   };
+  $("keepMargin").onchange = (e) => {
+    STATE.comp.keep_margin = parseFloat(e.target.value) || 0;
+    recompute();
+  };
+  $("perspTol").onchange = (e) => {
+    STATE.comp.persp_tol = parseFloat(e.target.value) || 0;
+    recompute();
+  };
+  $("ggInvert").onchange = (e) => { ggInvert = e.target.checked; drawGroundGlass(); };
   setTab();
 }
 
@@ -105,6 +121,9 @@ function setTab() {
 
 function syncControls() {
   for (const id of CAM_FIELDS) $(id).value = round3(STATE.camera[id]);
+  $("keepMargin").value = round3((STATE.comp || {}).keep_margin ?? 8);
+  $("perspTol").value = round3((STATE.comp || {}).persp_tol ?? 2);
+  $("ggInvert").checked = ggInvert;
   $("autoFocus").checked = STATE.pose.focus_mode !== "manual";
   for (const k in STATE.locks || {}) {
     const lab = document.querySelector(`#locks label[data-k="${k}"] input`);
@@ -129,6 +148,14 @@ function bindLocks() {
       const k = lab.dataset.k;
       STATE.locks[k] = e.target.checked;
       lab.classList.toggle("on", e.target.checked);
+      if (k === "camera_pos") {
+        for (const kk of ("rear_x", "front_x")) {
+          STATE.locks[kk] = e.target.checked;
+          const l2 = document.querySelector(`#locks label[data-k="${kk}"]`);
+          if (l2) { l2.querySelector("input").checked = e.target.checked;
+                    l2.classList.toggle("on", e.target.checked); }
+        }
+      }
     });
   });
 }
@@ -201,9 +228,11 @@ async function recompute(syncNudgeToo) {
 function renderAll(syncNudgeToo) {
   drawView("sideSvg", "side");
   drawView("topSvg", "top");
+  drawGroundGlass();
   renderMetrics();
   renderWarnings();
   renderPoints();
+  renderSubjectList();
   if (syncNudgeToo) syncNudges();
 }
 
@@ -314,6 +343,9 @@ function drawView(svgId, kind) {
       fill: info.ok ? "#8a93a6" : C.bad }, svg);
   });
 
+  // 勾线主体
+  drawViewSubjects(svg, v, P, kind);
+
   // 前/后组板 + 拖拽热区
   drawStandard(svg, v.rear, "rear", C.rear, P, kind);
   drawStandard(svg, v.front, "front", C.front, P, kind);
@@ -330,6 +362,48 @@ function drawView(svgId, kind) {
     const t = el("text", { x: px + 8, y: py - 7, fill: color, "font-size": 10 }, svg);
     t.textContent = p.name;
   });
+}
+
+const SUBJ_COLORS = { vline: "#fbbf24", hline: "#38bdf8", rect: "#f472b6", keep: "#ef6a5e" };
+
+function drawViewSubjects(svg, v, P, kind) {
+  (v.subjects || []).forEach((s) => {
+    const color = s.must_keep ? SUBJ_COLORS.keep : SUBJ_COLORS[s.type];
+    const sel = s.id === selectedSubjectId;
+    const pts = s.poly.map(P);
+    // 透明宽热区, 便于点选/整段拖动
+    if (pts.length >= 2) {
+      el("polyline", { points: pts.map(q => q.join(",")).join(" "),
+        class: "hit", fill: "none", "data-drag": "subject",
+        "data-sid": s.id, "data-kind": kind }, svg);
+    }
+    el("polyline", {
+      points: pts.map(q => q.join(",")).join(" "),
+      fill: s.type === "rect" ? "rgba(244,114,182,0.07)" : "none",
+      stroke: color, "stroke-width": sel ? 2.5 : 1.6,
+      "stroke-dasharray": s.must_keep ? "6 2" : "none",
+      style: sel ? "filter:drop-shadow(0 0 4px " + color + ")" : "",
+    }, svg);
+    // 端点(闭合矩形的最后一点与首点重复, 用 ends)
+    s.ends.forEach((q, ei) => {
+      const [hx, hy] = P(q);
+      el("rect", { x: hx - 4, y: hy - 4, width: 8, height: 8,
+        fill: "#0d0f13", stroke: color, "stroke-width": 1.6,
+        class: "hit", "data-drag": "subj_end", "data-sid": s.id,
+        "data-ei": ei, "data-kind": kind }, svg);
+    });
+    // 标签
+    const lx = pts[0][0], ly = pts[0][1];
+    const t = el("text", { x: lx + 6, y: ly + (kind === "side" ? -8 : 12),
+      fill: color, "font-size": 10 }, svg);
+    t.textContent = s.name + (s.must_keep ? " 🔒" : "");
+  });
+  // 正在勾画的临时线
+  if (drawing && drawing.kind === kind && drawing.cur) {
+    const a = P(drawing.start), b = P(drawing.cur);
+    el("line", { x1: a[0], y1: a[1], x2: b[0], y2: b[1],
+      stroke: "#fff", "stroke-width": 1, "stroke-dasharray": "4 3" }, svg);
+  }
 }
 
 function drawStandard(svg, std, which, color, P, kind) {
@@ -392,21 +466,66 @@ function screenToWorld(svgEl, kind, cx, cy) {
 
 function startDrag(e) {
   const t = e.target.closest("[data-drag]");
-  if (!t) return;
-  e.preventDefault();
   const svg = e.currentTarget;
   const kind = svg.id === "sideSvg" ? "side" : "top";
+
+  // 勾画模式: 在视图空白处按下开始画线
+  if (drawTool) {
+    const need = { vline: "side", rect: "side", keep: "side", hline: "top" }[drawTool];
+    if (need !== kind) {
+      flash(drawTool === "hline" ? "横线请在俯视图勾画" : "竖线/矩形请在侧视图勾画");
+      return;
+    }
+    e.preventDefault();
+    const w = screenToWorld(svg, kind, e.clientX, e.clientY);
+    const q = viewPoint(kind, w.x, w.v);
+    drawing = { kind, tool: drawTool, start: q, cur: q, svgId: svg.id };
+    svg.setPointerCapture(e.pointerId);
+    return;
+  }
+
+  if (!t) return;
+  e.preventDefault();
   drag = {
     type: t.dataset.drag, which: t.dataset.which, kind, svg,
     lastX: e.clientX, lastY: e.clientY,
     orig: JSON.parse(JSON.stringify(STATE.pose)),
     pointIndex: t.dataset.i != null ? parseInt(t.dataset.i, 10) : null,
+    sid: t.dataset.sid != null ? parseInt(t.dataset.sid, 10) : null,
+    endIndex: t.dataset.ei != null ? parseInt(t.dataset.ei, 10) : null,
+    subjOrig: null,
   };
+  if (drag.type === "subject" || drag.type === "subj_end") {
+    drag.subjOrig = JSON.parse(
+      JSON.stringify(STATE.subjects.find(s => s.id === drag.sid)));
+    selectedSubjectId = drag.sid;
+    renderSubjectList();
+  }
   svg.setPointerCapture(e.pointerId);
 }
 
+function viewPoint(kind, x, v) {
+  // 侧视图勾画: 给定 x 与 z; 俯视图: x 与 y, 其余坐标取被选主体/原点
+  if (kind === "side") return [x, 0, v];
+  return [x, v, 0];
+}
+
 let dragScheduled = false;
+let drawScheduled = false;
 async function moveDrag(e) {
+  if (drawing) {
+    if (drawScheduled) return;
+    drawScheduled = true;
+    requestAnimationFrame(() => {
+      drawScheduled = false;
+      if (!drawing) return;
+      const w = screenToWorld($(drawing.svgId), drawing.kind, e.clientX, e.clientY);
+      drawing.cur = viewPoint(drawing.kind, Math.max(1, w.x), w.v);
+      drawView("sideSvg", "side");
+      drawView("topSvg", "top");
+    });
+    return;
+  }
   if (!drag) return;
   if (dragScheduled) return;
   dragScheduled = true;
@@ -424,8 +543,56 @@ async function moveDrag(e) {
       }
     } else if (drag.type === "standard") {
       applyStandardDrag(e, dxPx, dyPx);
+    } else if (drag.type === "subj_end") {
+      applySubjectEndDrag(e);
+    } else if (drag.type === "subject") {
+      applySubjectMoveDrag(e, dxPx, dyPx);
     }
     await recompute(true);
+  });
+}
+
+// 拖主体端点: 端点在两个视图内的约束坐标联动
+function applySubjectEndDrag(ev) {
+  const sub = STATE.subjects.find(s => s.id === drag.sid);
+  if (!sub) return;
+  const w = screenToWorld(drag.svg, drag.kind, ev.clientX, ev.clientY);
+  const idx = drag.endIndex;
+  const q = sub.pts[idx >= sub.pts.length ? 0 : idx];
+  const o = drag.subjOrig.pts[idx >= drag.subjOrig.pts.length ? 0 : idx];
+  if (sub.type === "vline") {
+    // 竖线: 同一端点 x,y 固定, 侧视改 z; 俯视改 x,y
+    if (drag.kind === "side") { q[0] = o[0]; q[1] = o[1]; q[2] = w.v; }
+    else { q[0] = Math.max(1, w.x); q[1] = w.v; q[2] = o[2]; }
+    // 保持竖直: 两端 x,y 相同
+    const other = sub.pts[idx === 0 ? 1 : 0];
+    other[0] = q[0]; other[1] = q[1];
+  } else if (sub.type === "hline") {
+    // 横线: z 固定, 俯视改 x,y; 侧视改 x,z(高度)
+    if (drag.kind === "top") { q[0] = Math.max(1, w.x); q[1] = w.v; q[2] = o[2]; }
+    else { q[0] = Math.max(1, w.x); q[1] = o[1]; q[2] = w.v; }
+    // 两端同高
+    const other = sub.pts[idx === 0 ? 1 : 0];
+    other[2] = q[2];
+  } else {
+    // 矩形对角点: 保持竖直立面, 视情况允许两个对角各自自由
+    if (drag.kind === "side") { q[0] = Math.max(1, w.x); q[1] = o[1]; q[2] = w.v; }
+    else { q[0] = Math.max(1, w.x); q[1] = w.v; q[2] = o[2]; }
+  }
+}
+
+function applySubjectMoveDrag(ev, dxPx, dyPx) {
+  const sub = STATE.subjects.find(s => s.id === drag.sid);
+  if (!sub) return;
+  const T = viewTransform(drag.kind, drag.svg.getBoundingClientRect());
+  const mmPx = 1 / T.pxPerUnit;
+  const dx = dxPx * mmPx;
+  const dz = -dyPx * mmPx;   // 屏幕向上为 z+
+  const orig = drag.subjOrig.pts;
+  sub.pts.forEach((q, i) => {
+    q[0] = Math.max(1, orig[i][0] + dx);
+    if (drag.kind === "side") { q[2] = orig[i][2] + dz; }
+    else { q[1] = orig[i][1] + dz; }
   });
 }
 
@@ -461,12 +628,179 @@ window.addEventListener("keyup", (e) => { window.__shift = e.shiftKey; });
 function clampNum(x, lo, hi) { return Math.max(lo, Math.min(hi, x)); }
 
 function endDrag(e) {
+  // 勾画完成: 提交新主体
+  if (drawing) {
+    const d = drawing;
+    drawing = null;
+    const dist = Math.hypot(d.cur[0] - d.start[0],
+      d.kind === "side" ? d.cur[2] - d.start[2] : d.cur[1] - d.start[1]);
+    if (dist > 30) commitSubject(d);
+    else { drawView("sideSvg", "side"); drawView("topSvg", "top"); }
+    return;
+  }
   if (drag && drag.type === "standard" && STATE.pose.focus_mode === "manual"
       && $("autoFocus").checked) {
     STATE.pose.focus_mode = "auto";
     recompute(true);
   }
   drag = null;
+}
+
+function commitSubject(d) {
+  let a = d.start.slice(), b = d.cur.slice();
+  let type = d.tool;
+  let mustKeep = false;
+  if (d.tool === "keep") { type = "rect"; mustKeep = true; }
+  if (type === "vline") {
+    // 竖直: 上端 z 大
+    if (b[2] < a[2]) [a, b] = [b, a];
+    b[0] = a[0]; b[1] = a[1];
+  } else if (type === "hline") {
+    if (b[0] < a[0]) [a, b] = [b, a];
+    b[2] = a[2];
+  } else {
+    // 矩形: A 左下 (z 小), C 右上 (z 大)
+    if (b[2] < a[2]) [a, b] = [b, a];
+  }
+  const id = (STATE.subjects.reduce((m, s) => Math.max(m, s.id || 0), 0) || 0) + 1;
+  const typeName = { vline: "竖线", hline: "横线", rect: "矩形" }[type];
+  const sub = { id, type, name: typeName + id, must_keep: mustKeep, pts: [a, b] };
+  STATE.subjects.push(sub);
+  selectedSubjectId = id;
+  drawTool = ""; updateToolButtons();
+  flash("已添加" + (mustKeep ? "必留边界" : typeName));
+  recompute(true);
+}
+
+/* ---------------- 毛玻璃(片平面投影) ---------------- */
+function drawGroundGlass() {
+  const svg = $("ggSvg");
+  if (!svg || !RESULT || !RESULT.ground_glass) return;
+  svg.innerHTML = "";
+  const gg = RESULT.ground_glass;
+  const VW = 320, VH = 400, PAD = 26;
+  const w = gg.film_w, h = gg.film_h;
+  const sc = Math.min((VW - 2 * PAD) / w, (VH - 2 * PAD) / h);
+  const ox = (VW - w * sc) / 2, oy = (VH - h * sc) / 2;
+  // 片上 (s 向右, t 向上) -> SVG。毛玻璃倒像: 上下左右均翻转
+  function M(s, t) {
+    const sx = ggInvert ? -s : s, sy = ggInvert ? -t : t;
+    return [ox + (w / 2 + sx) * sc, oy + (h / 2 - sy) * sc];
+  }
+
+  // 片幅外暗底
+  el("rect", { x: 0, y: 0, width: VW, height: VH, fill: "#0b0e12" }, svg);
+  // 片幅
+  el("rect", { x: ox, y: oy, width: w * sc, height: h * sc,
+    fill: "#151a21", stroke: "#8a93a6", "stroke-width": 1.4 }, svg);
+  // 留边框
+  const m = Math.min(gg.keep_margin, w / 2 - 1, h / 2 - 1);
+  el("rect", { x: ox + m * sc, y: oy + m * sc,
+    width: (w - 2 * m) * sc, height: (h - 2 * m) * sc,
+    fill: "none", stroke: "#e8b04b", "stroke-width": 1,
+    "stroke-dasharray": "5 3" }, svg);
+
+  // 像场圈椭圆
+  if (gg.ic_ellipse) {
+    const [cx, cy] = M(gg.ic_ellipse.cx, gg.ic_ellipse.cy);
+    el("ellipse", { cx, cy, rx: gg.ic_ellipse.rx * sc, ry: gg.ic_ellipse.ry * sc,
+      fill: "rgba(74,168,255,0.05)", stroke: "rgba(74,168,255,0.65)",
+      "stroke-width": 1, "stroke-dasharray": "4 3",
+      transform: `rotate(${(ggInvert ? -1 : 1) * gg.ic_ellipse.rot * 180 / Math.PI} ${cx} ${cy})` },
+      svg);
+  }
+
+  // 主体投影
+  gg.subjects.forEach((s) => {
+    const color = s.must_keep ? SUBJ_COLORS.keep : SUBJ_COLORS[s.type];
+    const sel = s.id === selectedSubjectId;
+    const bad = s.issues.some(i => i.level === "critical");
+    const stroke = bad ? "#ef6a5e" : color;
+    (s.segs || []).forEach((seg) => {
+      const [a, b] = [M(seg[0][0], seg[0][1]), M(seg[1][0], seg[1][1])];
+      el("line", { x1: a[0], y1: a[1], x2: b[0], y2: b[1],
+        stroke, "stroke-width": sel ? 2.6 : 1.7,
+        "stroke-dasharray": s.clipped ? "5 2" : "none",
+        style: sel ? "filter:drop-shadow(0 0 4px " + color + ");cursor:pointer"
+                   : "cursor:pointer",
+        class: "gg-subj", "data-sid": s.id }, svg);
+    });
+    // 顶点
+    (s.verts || []).forEach((v) => {
+      if (!v) return;
+      const [x, y] = M(v[0], v[1]);
+      if (x < -20 || x > VW + 20 || y < -20 || y > VH + 20) return;
+      el("circle", { cx: x, cy: y, r: sel ? 3.4 : 2.4, fill: stroke,
+        style: "cursor:pointer", class: "gg-subj", "data-sid": s.id }, svg);
+    });
+  });
+
+  // 构图点/对焦点(片上位置)
+  (RESULT.points || []).forEach((p) => {
+    if (p.s == null || p.t == null) return;
+    const [x, y] = M(p.s, p.t);
+    if (x < 0 || x > VW || y < 0 || y > VH) return;
+    el("circle", { cx: x, cy: y, r: 2.2,
+      fill: p.kind === "focus" ? "rgba(76,195,138,.85)" : "rgba(74,168,255,.85)" }, svg);
+  });
+
+  // 片幅标签
+  const tag = el("text", { x: ox, y: VH - 8, fill: "#6b7484", "font-size": 9 }, svg);
+  tag.textContent = `${w}×${h} mm` + (ggInvert ? " · 倒像" : " · 正像(已翻转显示)");
+
+  svg.querySelectorAll(".gg-subj").forEach(node => {
+    node.addEventListener("click", () => {
+      selectedSubjectId = parseInt(node.dataset.sid, 10);
+      renderSubjectList();
+      drawView("sideSvg", "side"); drawView("topSvg", "top");
+      drawGroundGlass();
+    });
+  });
+  renderGroundGlassPanel(gg);
+}
+
+function renderGroundGlassPanel(gg) {
+  // 汇总指标
+  const sum = $("ggSummary");
+  const perspCls = gg.max_persp > gg.persp_tol ? "badval" : "goodval";
+  const crop = gg.min_margin == null ? "–" : gg.min_margin.toFixed(1);
+  const cropCls = gg.min_margin != null && gg.min_margin < gg.keep_margin
+    ? "badval" : "goodval";
+  sum.innerHTML = `
+    <span>越界/异常<b class="${gg.violations ? "badval" : "goodval"}">${gg.violations}</b></span>
+    <span>最大透视<b class="${perspCls}">${gg.max_persp.toFixed(1)}</b></span>
+    <span>裁切余量 mm<b class="${cropCls}">${crop}</b></span>
+    <span>留边 mm<b>${gg.keep_margin.toFixed(0)}</b></span>`;
+
+  // 异常列表(点选回到对应主体)
+  const box = $("ggIssues");
+  box.innerHTML = "";
+  if (!gg.issues.length) {
+    box.innerHTML = '<div style="color:var(--good);font-size:11px;padding:4px">✓ 主体构图全部正常</div>';
+    return;
+  }
+  gg.issues.forEach((it) => {
+    const d = document.createElement("div");
+    d.className = "gg-item " + (it.level === "critical" ? "critical" : "");
+    d.innerHTML = `${it.msg}<div class="sub">点击定位到主体</div>`;
+    d.onclick = () => locateSubject(it.subject_id);
+    box.appendChild(d);
+  });
+}
+
+function locateSubject(sid) {
+  selectedSubjectId = sid;
+  renderSubjectList();
+  drawView("sideSvg", "side"); drawView("topSvg", "top");
+  drawGroundGlass();
+  // 在侧/俯视图闪烁高亮
+  ["sideSvg", "topSvg"].forEach(id => {
+    const node = document.querySelector(`#${id} [data-sid="${sid}"]`);
+    if (node) {
+      node.style.filter = "drop-shadow(0 0 6px #fff)";
+      setTimeout(() => { node.style.filter = ""; }, 1800);
+    }
+  });
 }
 
 /* ---------------- 指标 / 警告 ---------------- */
@@ -504,7 +838,11 @@ function renderWarnings() {
     const d = document.createElement("div");
     d.className = "warnitem " + (w.level === "critical" ? "critical" : "warn");
     d.innerHTML = `${w.msg}<span class="part">${partLabel(w.part)}</span>`;
-    d.onclick = () => locatePart(w.part);
+    d.onclick = () => {
+      if (String(w.part).startsWith("subject:")) {
+        locateSubject(w.detail && w.detail.subject_id);
+      } else locatePart(w.part);
+    };
     box.appendChild(d);
   });
 }
@@ -518,7 +856,7 @@ function partLabel(part) {
     front_x: "前组轨道", rear_x: "后组轨道",
     bellows: "皮腔", standards: "前后组", image_circle: "像场",
     focus: "对焦", composition: "构图",
-  })[part] || part;
+  })[part] || (String(part).startsWith("subject:") ? "主体" : part);
 }
 
 function locatePart(part) {
@@ -544,6 +882,89 @@ function locatePart(part) {
     document.getElementById(m[0]).scrollIntoView({ block: "nearest" });
     setTimeout(() => { seg.removeAttribute("stroke"); seg.style.filter = ""; }, 2200);
   }
+}
+
+/* ---------------- 勾线主体 ---------------- */
+function bindSubjectUI() {
+  document.querySelectorAll("#drawTools button").forEach((b) => {
+    b.onclick = () => {
+      drawTool = drawTool === b.dataset.tool ? "" : b.dataset.tool;
+      updateToolButtons();
+      if (drawTool === "hline") flash("在俯视图按下拖动勾画横线");
+      else if (drawTool) flash("在侧视图按下拖动勾画" + b.textContent.trim());
+    };
+  });
+}
+
+function updateToolButtons() {
+  document.querySelectorAll("#drawTools button").forEach((b) => {
+    b.classList.toggle("on", (b.dataset.tool || "") === drawTool);
+  });
+  document.body.style.cursor = drawTool ? "crosshair" : "";
+}
+
+function subjSignature() {
+  return (STATE.subjects || []).map(s =>
+    s.id + ":" + s.type + ":" + s.must_keep + ":" + s.name).join("|");
+}
+
+function renderSubjectList() {
+  const box = $("subjList");
+  if (!box) return;
+  const sig = subjSignature();
+  // 名称编辑中不重建, 避免打断输入
+  if (sig === lastSubjSig && box.dataset.editing) return;
+  lastSubjSig = sig;
+  box.innerHTML = "";
+  if (!STATE.subjects || !STATE.subjects.length) {
+    box.innerHTML = '<div style="color:var(--dim);font-size:11px;padding:3px">暂无勾线主体</div>';
+    return;
+  }
+  STATE.subjects.forEach((s) => {
+    const gg = (RESULT && RESULT.ground_glass)
+      ? RESULT.ground_glass.subjects.find(g => g.id === s.id) : null;
+    const nIssue = gg ? gg.issues.length : 0;
+    const row = document.createElement("div");
+    row.className = "subjrow" + (s.id === selectedSubjectId ? " sel" : "");
+    const typeNm = { vline: "竖线", hline: "横线", rect: "矩形" }[s.type];
+    row.innerHTML = `
+      <span class="mk ${s.must_keep ? "keep" : ""}">${s.must_keep ? "🔒" : "▸"}</span>
+      <input class="nm" value="${escapeHtml(s.name)}" style="background:transparent;border:none;
+        color:inherit;font-size:11px;flex:1;min-width:0">
+      <span class="mk" style="color:var(--dim)">${typeNm}</span>
+      <span class="mk ${nIssue ? "badval" : "goodval"}" title="异常项数">${nIssue || "✓"}</span>
+      <label class="mk" title="必留边界">必留<input type="checkbox" ${s.must_keep ? "checked" : ""}></label>
+      <button class="ghost danger" data-del>×</button>`;
+    row.onclick = (ev) => {
+      if (ev.target.tagName === "INPUT" || ev.target.tagName === "BUTTON" ||
+          ev.target.tagName === "LABEL") return;
+      selectedSubjectId = s.id;
+      renderSubjectList();
+      drawView("sideSvg", "side"); drawView("topSvg", "top");
+      drawGroundGlass();
+    };
+    const nameInp = row.querySelector("input.nm");
+    nameInp.onfocus = () => { box.dataset.editing = "1"; };
+    nameInp.onchange = () => {
+      s.name = nameInp.value || s.name;
+      delete box.dataset.editing;
+      lastSubjSig = ""; renderSubjectList();
+      drawView("sideSvg", "side"); drawView("topSvg", "top");
+      drawGroundGlass();
+    };
+    row.querySelector('input[type="checkbox"]').onchange = (ev) => {
+      s.must_keep = ev.target.checked;
+      ev.stopPropagation();
+      recompute(true);
+    };
+    row.querySelector("[data-del]").onclick = (ev) => {
+      ev.stopPropagation();
+      STATE.subjects = STATE.subjects.filter(x => x.id !== s.id);
+      if (selectedSubjectId === s.id) selectedSubjectId = null;
+      recompute(true);
+    };
+    box.appendChild(row);
+  });
 }
 
 /* ---------------- 搜索 / 候选比较 ---------------- */
@@ -592,12 +1013,14 @@ function renderCandidates() {
     d.style.borderLeft = `4px solid ${on ? color : "var(--line)"}`;
     d.innerHTML = `
       <div class="candhead">
-        <b>#${i + 1} 模糊 ${c.max_blur.toFixed(3)} mm</b>
-        <span class="${c.hard_warn ? "badval" : "goodval"}">${c.hard_warn ? "有硬警告" : "可行"}</span>
+        <b>#${i + 1} 越界 ${c.oob || 0} · 透视 ${(c.max_persp || 0).toFixed(1)}°</b>
+        <span class="${c.hard_warn || c.oob ? "badval" : "goodval"}">
+          ${c.hard_warn ? "有硬警告" : "可行"}</span>
       </div>
       <div class="candvals">
-        像场余量 ${c.ic_margin.toFixed(0)} mm · 调整量 ${c.cost.toFixed(0)}
-        · 伸长 ${c.extension.toFixed(0)}<br>
+        裁切余量 ${c.crop_margin != null && c.crop_margin > -9000 ? c.crop_margin.toFixed(0) : "–"} mm
+        · 调整量 ${c.cost.toFixed(0)} · 模糊 ${c.max_blur.toFixed(3)}<br>
+        像场余量 ${c.ic_margin.toFixed(0)} mm · 伸长 ${c.extension.toFixed(0)}<br>
         后组 俯${c.pose.rear.tilt.toFixed(1)}° 摇${c.pose.rear.swing.toFixed(1)}°
         升${c.pose.rear.rise.toFixed(0)} 移${c.pose.rear.shift.toFixed(0)}<br>
         前组 俯${c.pose.front.tilt.toFixed(1)}° 摇${c.pose.front.swing.toFixed(1)}°
@@ -643,9 +1066,13 @@ async function togglePlans() {
     const div = document.createElement("div");
     div.className = "planitem";
     const warnN = p.brief ? (p.brief.warnings || []).length : 0;
+    const crop = p.brief && p.brief.crop_margin != null
+      ? " · 余量 " + p.brief.crop_margin.toFixed(0) + "mm" : "";
+    const persp = p.brief && p.brief.max_persp != null
+      ? " · 透视 " + p.brief.max_persp.toFixed(1) + "°" : "";
     div.innerHTML = `<div class="nm">${escapeHtml(p.name)}
       <br><small>${new Date(p.updated_at * 1000).toLocaleString()} ·
-      伸长 ${p.brief ? p.brief.extension.toFixed(0) : "?"} mm ·
+      伸长 ${p.brief ? p.brief.extension.toFixed(0) : "?"} mm${crop}${persp} ·
       ${warnN ? warnN + " 条警告" : "无警告"}</small></div>
       <button data-load>载入</button> <button class="danger" data-del>删</button>`;
     div.querySelector("[data-load]").onclick = async () => {
@@ -708,12 +1135,71 @@ function openCard() {
     光轴伸长 <b>${RESULT.extension.toFixed(1)} mm</b> ·
     有效光圈 <b>f/${RESULT.f_number_eff.toFixed(1)}</b> ·
     最大模糊圆 <b>${RESULT.max_blur.toFixed(3)} mm</b> ·
-    像场余量 <b>${RESULT.ic_min_margin.toFixed(1)} mm</b>
+    像场余量 <b>${RESULT.ic_min_margin.toFixed(1)} mm</b> ·
+    最大透视误差 <b>${(RESULT.ground_glass ? RESULT.ground_glass.max_persp : 0).toFixed(1)}°</b> ·
+    裁切余量 <b>${RESULT.ground_glass && RESULT.ground_glass.min_margin != null
+      ? RESULT.ground_glass.min_margin.toFixed(1) : "–"} mm</b>
   </div>
+  <h3 style="font-size:12px;margin:12px 0 4px">片内边界（毛玻璃倒像，红=必留边界，虚线=留边 ${(STATE.comp||{}).keep_margin ?? 8} mm）</h3>
+  ${cardFilmSvg()}
+  <div class="sub">${cardSubjectTable()}</div>
   <div class="sub">警告: ${RESULT.warnings.length ? RESULT.warnings.map(x => x.msg).join("；") : "无"}</div>
   <button class="noprint" onclick="print()">打印调整卡</button>
   </body></html>`);
   w.document.close();
+}
+
+function cardFilmSvg() {
+  const gg = RESULT.ground_glass;
+  if (!gg) return "";
+  const VW = 300, VH = Math.round(VW * gg.film_h / gg.film_w), PAD = 10;
+  const sc = Math.min((VW - 2 * PAD) / gg.film_w, 160 / gg.film_h);
+  const W = gg.film_w * sc + 2 * PAD, H = gg.film_h * sc + 2 * PAD;
+  const ox = PAD, oy = PAD;
+  // 片上坐标 -> 卡片 SVG, 按毛玻璃倒像(上下左右翻转), 与现场看到的一致
+  function M(s, t) {
+    return [ox + (gg.film_w / 2 - s) * sc, oy + (gg.film_h / 2 - t) * sc];
+  }
+  let svg = `<svg width="${W}" height="${H}" style="border:1px solid #555;background:#111">`;
+  svg += `<rect x="${ox}" y="${oy}" width="${gg.film_w * sc}" height="${gg.film_h * sc}"
+    fill="none" stroke="#0a0" stroke-width="1.2"/>`;
+  const km = Math.min(gg.keep_margin, gg.film_w / 2 - 1, gg.film_h / 2 - 1);
+  svg += `<rect x="${ox + km * sc}" y="${oy + km * sc}"
+    width="${(gg.film_w - 2 * km) * sc}" height="${(gg.film_h - 2 * km) * sc}"
+    fill="none" stroke="#e8b04b" stroke-dasharray="4 3" stroke-width="1"/>`;
+  if (gg.ic_ellipse) {
+    const [cx, cy] = M(gg.ic_ellipse.cx, gg.ic_ellipse.cy);
+    svg += `<ellipse cx="${cx}" cy="${cy}" rx="${gg.ic_ellipse.rx * sc}"
+      ry="${gg.ic_ellipse.ry * sc}" fill="none" stroke="#4aa8ff" stroke-dasharray="3 3"
+      transform="rotate(${gg.ic_ellipse.rot * 180 / Math.PI} ${cx} ${cy})"/>`;
+  }
+  for (const s of gg.subjects) {
+    const col = s.must_keep ? "#e44" : "#f472b6";
+    for (const seg of s.segs) {
+      const a = M(seg[0][0], seg[0][1]), b = M(seg[1][0], seg[1][1]);
+      svg += `<line x1="${a[0].toFixed(1)}" y1="${a[1].toFixed(1)}"
+        x2="${b[0].toFixed(1)}" y2="${b[1].toFixed(1)}" stroke="${col}" stroke-width="1.5"/>`;
+    }
+  }
+  return svg + "</svg>";
+}
+
+function cardSubjectTable() {
+  const gg = RESULT.ground_glass;
+  if (!gg || !gg.subjects.length) return "";
+  const rows = gg.subjects.map(s => {
+    const m = s.metrics || {};
+    const parts = [];
+    if (m.convergence != null) parts.push("汇聚 " + m.convergence.toFixed(1) + "°");
+    if (m.h_tilt != null) parts.push("横斜 " + m.h_tilt.toFixed(1) + "°");
+    if (m.keystone != null) parts.push("梯形 " + m.keystone.toFixed(1) + "%");
+    if (m.mag_spread != null) parts.push("放大率差 " + m.mag_spread.toFixed(1) + "%");
+    if (m.edge_margin != null) parts.push("余量 " + m.edge_margin.toFixed(1) + "mm");
+    return `<b>${s.must_keep ? "🔒 " : ""}${s.name}</b>: ${parts.join(" · ") || "成像正常"}
+      ${s.issues.length ? "<br><span style='color:#c33'>" +
+        s.issues.map(i => i.msg).join("；") + "</span>" : ""}`;
+  });
+  return rows.join("<br><br>");
 }
 
 function degreeRuler(r, cam) {

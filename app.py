@@ -89,8 +89,36 @@ def _clean_state(data):
         })
     if not pts:
         pts = base["points"]
+    subjects = []
+    max_id = 0
+    if data.get("subjects") is None and not data.get("points"):
+        subjects = json.loads(json.dumps(base["subjects"]))
+    for s in data.get("subjects") or []:
+        typ = s.get("type", "vline")
+        if typ not in ("vline", "hline", "rect"):
+            typ = "vline"
+        qs = []
+        for q in (s.get("pts") or [])[:2]:
+            qs.append([float(q[0]), float(q[1]), float(q[2])])
+        if len(qs) < 2:
+            continue
+        sub = {"id": int(s.get("id") or 0), "type": typ,
+               "name": str(s.get("name", ""))[:40],
+               "must_keep": bool(s.get("must_keep")), "pts": qs}
+        max_id = max(max_id, sub["id"])
+        subjects.append(sub)
+    for i, s in enumerate(subjects):
+        if not s["id"]:
+            max_id += 1
+            s["id"] = max_id
+    comp_in = data.get("comp") or {}
+    comp = {
+        "keep_margin": float(comp_in.get("keep_margin", base["comp"]["keep_margin"])),
+        "persp_tol": float(comp_in.get("persp_tol", base["comp"]["persp_tol"])),
+    }
     locks = {k: bool(v) for k, v in (data.get("locks") or {}).items()}
-    return {"camera": cam, "pose": pose, "points": pts, "locks": locks}
+    return {"camera": cam, "pose": pose, "points": pts,
+            "subjects": subjects, "comp": comp, "locks": locks}
 
 
 @app.route("/api/compute", methods=["POST"])
@@ -181,6 +209,7 @@ def _brief(result):
     """方案列表只存摘要, 减小体积。"""
     if not result:
         return None
+    gg = result.get("ground_glass") or {}
     return {
         "extension": result.get("extension"),
         "max_blur": result.get("max_blur"),
@@ -188,6 +217,9 @@ def _brief(result):
         "f_number_eff": result.get("f_number_eff"),
         "min_clearance": result.get("min_clearance"),
         "warnings": result.get("warnings"),
+        "max_persp": gg.get("max_persp"),
+        "crop_margin": gg.get("min_margin"),
+        "gg_violations": gg.get("violations"),
     }
 
 

@@ -50,6 +50,8 @@
     <div class="section">
       <h3>锁定</h3>
       <div class="lockrow" id="locks">
+        <label data-k="camera_pos"><input type="checkbox">机位(前后组轨道)</label>
+        <label data-k="focus_plane"><input type="checkbox">焦平面</label>
         <label data-k="rear_x"><input type="checkbox">后组机位</label>
         <label data-k="front_x"><input type="checkbox">前组机位</label>
         <label data-k="rear_tilt"><input type="checkbox">后俯仰</label>
@@ -62,6 +64,29 @@
         <label data-k="front_shift"><input type="checkbox">前平移</label>
         <label data-k="composition"><input type="checkbox">构图边界</label>
       </div>
+    </div>
+
+    <div class="section">
+      <h3>勾线主体（俯视图/侧视图勾画）</h3>
+      <div class="drawtools" id="drawTools">
+        <button data-tool="vline" title="竖线：侧视图勾画，高度方向">▏竖线</button>
+        <button data-tool="hline" title="横线：俯视图勾画，水平方向">— 横线</button>
+        <button data-tool="rect" title="竖直矩形/立面：侧视图勾画对角线">▭ 矩形</button>
+        <button data-tool="keep" title="必留边界矩形：必须完整留在片幅内">🔒 必留边界</button>
+        <button data-tool="" class="ghost on">选择/拖动</button>
+      </div>
+      <div id="subjList" class="subjlist"></div>
+    </div>
+
+    <div class="section">
+      <h3>留边与透视容差</h3>
+      <div class="grid2">
+        <div class="fld"><label>留边 mm（片上）</label><input type="number" id="keepMargin" step="1"></div>
+        <div class="fld"><label>透视容差（° / %）</label><input type="number" id="perspTol" step="0.5"></div>
+      </div>
+      <label style="font-size:11px;color:var(--dim)">
+        <input type="checkbox" id="ggInvert" checked> 毛玻璃显示倒像（实际片上方向）
+      </label>
     </div>
 
     <div class="section">
@@ -96,25 +121,42 @@
   <!-- 右侧视图 + 底栏 -->
   <div class="main">
     <div class="views">
-      <div class="view-wrap">
-        <div class="view-title">侧视图 (x–z，高度方向)</div>
-        <svg id="sideSvg" viewBox="0 0 800 600" preserveAspectRatio="xMidYMid meet"></svg>
-        <div class="legend">
-          <span><i style="background:var(--rear)"></i>后组</span>
-          <span><i style="background:var(--front)"></i>前组</span>
-          <span><i style="background:var(--plane)"></i>焦平面</span>
-          <span><i style="background:var(--hinge)"></i>铰链线</span>
-          <span><i style="background:#2f6f4f"></i>景深楔形</span>
+      <div class="view-col">
+        <div class="views-row">
+          <div class="view-wrap">
+            <div class="view-title">侧视图 (x–z，高度方向)</div>
+            <svg id="sideSvg" viewBox="0 0 800 600" preserveAspectRatio="xMidYMid meet"></svg>
+            <div class="legend">
+              <span><i style="background:var(--rear)"></i>后组</span>
+              <span><i style="background:var(--front)"></i>前组</span>
+              <span><i style="background:var(--plane)"></i>焦平面</span>
+              <span><i style="background:var(--hinge)"></i>铰链线</span>
+              <span><i style="background:#2f6f4f"></i>景深楔形</span>
+            </div>
+          </div>
+          <div class="view-wrap">
+            <div class="view-title">俯视图 (x–y，水平方向)</div>
+            <svg id="topSvg" viewBox="0 0 800 600" preserveAspectRatio="xMidYMid meet"></svg>
+            <div class="legend">
+              <span><i style="background:var(--rear)"></i>后组</span>
+              <span><i style="background:var(--front)"></i>前组</span>
+              <span><i style="background:var(--plane)"></i>焦平面</span>
+              <span><i style="background:var(--hinge)"></i>铰链线</span>
+            </div>
+          </div>
         </div>
       </div>
-      <div class="view-wrap">
-        <div class="view-title">俯视图 (x–y，水平方向)</div>
-        <svg id="topSvg" viewBox="0 0 800 600" preserveAspectRatio="xMidYMid meet"></svg>
-        <div class="legend">
-          <span><i style="background:var(--rear)"></i>后组</span>
-          <span><i style="background:var(--front)"></i>前组</span>
-          <span><i style="background:var(--plane)"></i>焦平面</span>
-          <span><i style="background:var(--hinge)"></i>铰链线</span>
+      <div class="gg-col">
+        <div class="gg-title">
+          毛玻璃倒像（片平面投影）
+          <span id="ggHint" class="gghint"></span>
+        </div>
+        <div class="gg-body">
+          <svg id="ggSvg" viewBox="0 0 320 400" preserveAspectRatio="xMidYMid meet"></svg>
+          <div class="gg-side">
+            <div class="gg-summary" id="ggSummary"></div>
+            <div class="gg-issues" id="ggIssues"></div>
+          </div>
         </div>
       </div>
     </div>

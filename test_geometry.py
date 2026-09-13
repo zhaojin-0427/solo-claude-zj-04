@@ -75,4 +75,42 @@ print("4 3pt plane: rear tilt=%.2f swing=%.2f blur=%.5f"
       % (pose4["rear"]["tilt"], pose4["rear"]["swing"], r4["max_blur"]))
 assert r4["max_blur"] < 0.02, r4["max_blur"]  # 角度网格精度, 远小于 CoC 0.1
 
+# 5) 片平面投影 / 毛玻璃
+st5 = cg.default_state()
+cg.autofocus(st5)
+r5 = cg.compute(st5)
+gg5 = r5["ground_glass"]
+assert gg5["film_w"] == st5["camera"]["film_w"]
+assert gg5["ic_ellipse"] is not None
+# 无倾角: 像场圈在片上为圆(两半轴相等)
+assert abs(gg5["ic_ellipse"]["rx"] - gg5["ic_ellipse"]["ry"]) < 0.5
+# 正对立面上的竖线应平行(汇聚≈0)
+v = [s for s in gg5["subjects"] if s["type"] == "vline"][0]
+assert v["metrics"].get("convergence", 0) < 0.5, v["metrics"]
+# 矩形有 4 条片上折线段(未被虚像剔除)
+rect = [s for s in gg5["subjects"] if s["type"] == "rect"][0]
+assert len(rect["segs"]) == 4, len(rect["segs"])
+# 留边收紧 -> 必留矩形报 margin 违规
+st5b = cg.default_state()
+st5b["comp"]["keep_margin"] = 40.0
+gg5b = cg.compute(st5b)["ground_glass"]
+rectb = [s for s in gg5b["subjects"] if s["must_keep"]][0]
+assert any(i["code"] == "margin" and i["level"] == "critical" for i in rectb["issues"])
+
+# 6) 倾斜后组: 像场圈为椭圆, 竖线出现汇聚
+st6 = cg.default_state()
+st6["pose"]["rear"]["tilt"] = 6.0
+st6["pose"]["focus_mode"] = "manual"
+gg6 = cg.compute(st6)["ground_glass"]
+el6 = gg6["ic_ellipse"]
+assert abs(el6["rx"] - el6["ry"]) > 0.5, (el6["rx"], el6["ry"])
+
+# 7) 搜索新排序: oob -> max_persp -> -crop -> cost
+res7 = cg.search(st5, {"angle_step": 5.0})
+cs7 = res7["candidates"]
+keys = [(c["oob"], round(c["max_persp"], 3), -round(c["crop_margin"], 2),
+         round(c["cost"], 2)) for c in cs7]
+assert keys == sorted(keys), keys[:5]
+assert all("oob" in c and "max_persp" in c and "crop_margin" in c for c in cs7)
+
 print("ALL GEOMETRY TESTS PASSED")

@@ -81,6 +81,17 @@ def default_state():
             {"name": "近点", "x": 900.0, "y": 0.0, "z": -200.0, "kind": "focus"},
             {"name": "远点", "x": 1600.0, "y": 0.0, "z": 150.0, "kind": "focus"},
         ],
+        # 勾线主体: vline 竖线(pts=[底,顶], x/y 相同);
+        # hline 横线(pts=[端,端], z 相同);
+        # rect 竖直矩形/必留边界(pts=[对角 A,C], 导出四角 A,B,C,D)
+        "subjects": [
+            {"id": 1, "type": "rect", "name": "主体立面", "must_keep": True,
+             "pts": [[1150.0, -220.0, -200.0], [1250.0, 220.0, 200.0]]},
+            {"id": 2, "type": "vline", "name": "墙角竖线", "must_keep": False,
+             "pts": [[1200.0, 260.0, -200.0], [1200.0, 260.0, 200.0]]},
+        ],
+        # 构图设置: 留边(片上 mm), 透视容差(角度°, 同时作为梯形/放大率差 % 阈值)
+        "comp": {"keep_margin": 8.0, "persp_tol": 2.0},
         "locks": {},
     }
 
@@ -223,6 +234,309 @@ def blur_diameter(Q, p_R, R, p_F, L, f, aperture_diam, samples=16):
     cy = sum(h[1] for h in hits) / len(hits)
     cz = sum(h[2] for h in hits) / len(hits)
     return max(vnorm(vsub(h, [cx, cy, cz])) for h in hits) * 2.0
+
+
+# ---------------- 片平面投影 / 毛玻璃 ----------------
+def film_coords(Q, p_R, R, p_F, n_L, f):
+    """世界点 -> 后组片平面坐标 (s 向右, t 向上, mm); 虚像/退化返回 None。"""
+    Xp = image_point(Q, p_F, n_L, f)
+    if Xp is None:
+        return None
+    # 像必须落在镜头后方(片侧): (Xp-F)·n_L < 0
+    if vdot(vsub(Xp, p_F), n_L) >= -1e-6:
+        return None
+    return (vdot(vsub(Xp, p_R), R[2]), vdot(vsub(Xp, p_R), R[1]))
+
+
+def image_scale(Q, p_F, n_L, f):
+    """点的横向放大率(绝对值), 用于片上边缘放大率差。"""
+    d = vdot(vsub(Q, p_F), n_L)
+    if abs(f - d) < 1e-9:
+        return None
+    lam = f / (f - d)
+    return abs(lam)
+
+
+def _clip_param(P0, P1, half_w, half_h):
+    """Liang-Barsky 裁剪参数段到 [-half,half]², 返回 (t0,t1) 或 None。"""
+    t0, t1 = 0.0, 1.0
+    for p, q in ((-P1[0], P0[0] + half_w), (P1[0], half_w - P0[0]),
+                 (-P1[1], P0[1] + half_h), (P1[1], half_h - P0[1])):
+        if abs(p) < 1e-15:
+            if q < 0:
+                return None
+            continue
+        r = q / p
+        if p < 0:
+            if r > t1:
+                return None
+            if r > t0:
+                t0 = r
+        else:
+            if r < t0:
+                return None
+            if r < t1:
+                t1 = r
+    return t0, t1
+
+
+def project_poly(Qs, p_R, R, p_F, n_L, f, w, h):
+    """
+    折线(世界点列) -> 片上折线, 自动裁剪到片幅。
+    返回 {verts:[(s,t)...], segs:[[a,b]...], clipped:bool, in_count:int,
+          scales:[m...], out:bool(完全在片后/虚像)}
+    """
+    hw, hh = w / 2.0, h / 2.0
+    verts, scales, valid = [], [], []
+    for Q in Qs:
+        st = film_coords(Q, p_R, R, p_F, n_L, f)
+        if st is None:
+            verts.append(None)
+            scales.append(None)
+            valid.append(False)
+            continue
+        verts.append(st)
+        scales.append(image_scale(Q, p_F, n_L, f))
+        valid.append(-hw - 1 <= st[0] <= hw + 1 and -hh - 1 <= st[1] <= hh + 1)
+    segs, clipped = [], False
+    for i in range(len(verts) - 1):
+        a, b = verts[i], verts[i + 1]
+        if a is None or b is None:
+            clipped = True
+            continue
+        d = (b[0] - a[0], b[1] - a[1])
+        cp = _clip_param(a, d, hw, hh)
+        if cp is None:
+            clipped = True
+            continue
+        t0, t1 = cp
+        if t0 > 1e-9 or t1 < 1 - 1e-9:
+            clipped = True
+        A = (a[0] + d[0] * t0, a[1] + d[1] * t0)
+        B = (a[0] + d[0] * t1, a[1] + d[1] * t1)
+        segs.append([A, B])
+    return {"verts": verts, "segs": segs, "clipped": clipped,
+            "in_count": sum(valid), "scales": scales,
+            "out": all(v is None for v in verts)}
+
+
+def rect_corners(sub):
+    """矩形对角点 -> 四角 A(左下) B(右下) C(右上) D(左上), 竖直立面。"""
+    A, C = sub["pts"][0], sub["pts"][1]
+    B = [C[0], C[1], A[2]]
+    D = [A[0], A[1], C[2]]
+    return [A, B, C, D]
+
+
+def subject_world_points(sub):
+    if sub.get("type") == "rect":
+        cs = rect_corners(sub)
+        return cs + [cs[0]]     # 闭合折线
+    return [list(p) for p in sub["pts"]]
+
+
+def _seg_angle(a, b):
+    return R2D(math.atan2(b[1] - a[1], b[0] - a[0]))
+
+
+def _seg_len(a, b):
+    return math.hypot(b[0] - a[0], b[1] - a[1])
+
+
+def _fit_ellipse(pts):
+    """由同心椭圆采样点估计 (cx,cy,rx,ry,rot): 中心取均值, 特征分解协方差。"""
+    n = len(pts)
+    mx = sum(p[0] for p in pts) / n
+    my = sum(p[1] for p in pts) / n
+    cov = [0.0, 0.0, 0.0]
+    for x, y in pts:
+        dx, dy = x - mx, y - my
+        cov[0] += dx * dx
+        cov[1] += dx * dy
+        cov[2] += dy * dy
+    cov = [v / n for v in cov]
+    # 椭圆边界点协方差: 沿轴方差 = r²/4
+    tr = cov[0] + cov[2]
+    disc = math.sqrt(max(0.0, (cov[0] - cov[2]) ** 2 + 4 * cov[1] ** 2))
+    l1, l2 = (tr + disc) / 2, (tr - disc) / 2
+    rx, ry = 2 * math.sqrt(max(l1, 0)), 2 * math.sqrt(max(l2, 0))
+    rot = 0.5 * math.atan2(2 * cov[1], cov[0] - cov[2])
+    return {"cx": mx, "cy": my, "rx": rx, "ry": ry, "rot": rot}
+
+
+def analyze_subject(sub, proj, tol_deg, margin, w, h):
+    """单个主体的毛玻璃指标。proj 为 project_poly 结果。"""
+    hw, hh = w / 2.0, h / 2.0
+    typ = sub.get("type", "vline")
+    issues, metrics = [], {}
+    segs = proj["segs"]
+    must = bool(sub.get("must_keep"))
+
+    if proj["out"] or not segs:
+        return {"issues": [{"code": "virtual", "level": "critical",
+                            "msg": "%s：主体位于片平面后方/虚像，无法成像" % sub.get("name", "")}],
+                "metrics": metrics}
+
+    # 裁切: 片幅物理裁切; 必留边界还要查留边
+    if proj["clipped"]:
+        issues.append({"code": "clip", "level": "critical" if must else "warn",
+                       "msg": "%s：倒像被片幅%s" % (sub.get("name", ""),
+                              "裁切（必留边界！）" if must else "裁切")})
+    # 到片幅边缘的最小余量
+    min_edge = None
+    for sA, sB in segs:
+        for s, t in (sA, sB):
+            m = min(hw - abs(s), hh - abs(t))
+            min_edge = m if min_edge is None else min(min_edge, m)
+    metrics["edge_margin"] = min_edge
+    if min_edge is not None and min_edge < margin:
+        issues.append({"code": "margin", "level": "critical" if must else "warn",
+                       "msg": "%s：裁切余量 %.1f mm 小于留边 %.1f mm%s"
+                              % (sub.get("name", ""), min_edge, margin,
+                                 "（必留边界）" if must else "")})
+
+    verts = proj["verts"]
+    # 竖线汇聚 / 横线倾斜: 片上角度相对竖直(90°)/水平(0°)
+    if typ == "vline" and segs:
+        ang = _seg_angle(segs[0][0], segs[0][1])
+        conv = abs(abs(ang) - 90.0)
+        conv = min(conv, 180 - conv) if conv <= 180 else conv
+        metrics["convergence"] = conv
+        if conv > tol_deg:
+            issues.append({"code": "convergence", "level": "warn",
+                           "msg": "%s：竖线汇聚 %.2f°（容差 %.1f°）"
+                                  % (sub.get("name", ""), conv, tol_deg)})
+    if typ == "hline" and segs:
+        ang = _seg_angle(segs[0][0], segs[0][1])
+        tilt = min(abs(ang), abs(abs(ang) - 180.0))
+        metrics["h_tilt"] = tilt
+        if tilt > tol_deg:
+            issues.append({"code": "h_tilt", "level": "warn",
+                           "msg": "%s：横线倾斜 %.2f°（容差 %.1f°）"
+                                  % (sub.get("name", ""), tilt, tol_deg)})
+
+    if typ == "rect" and len(segs) >= 3:
+        # 四角投影(可能 None), 边沿顺序 A-B, B-C, C-D, D-A
+        P = verts[:4]
+        L = []
+        for i in range(4):
+            a, b = P[i], P[(i + 1) % 4]
+            L.append(_seg_len(a, b) if a is not None and b is not None else None)
+        bot, right, top, left = L
+        # 梯形畸变: 竖边相对差(左右)、横边相对差(上下), 取大
+        keystone = 0.0
+        for u_, v_ in ((left, right), (bot, top)):
+            if u_ and v_ and max(u_, v_) > 1e-9:
+                keystone = max(keystone, abs(u_ - v_) / max(u_, v_) * 100.0)
+        metrics["keystone"] = keystone
+        if keystone > tol_deg:
+            issues.append({"code": "keystone", "level": "warn",
+                           "msg": "%s：梯形畸变 %.1f%%（容差 %.1f%%）"
+                                  % (sub.get("name", ""), keystone, tol_deg)})
+        # 竖边汇聚(矩形两竖边互不平行的夹角)
+        if P[0] and P[1] and P[3] and P[2]:
+            a1 = _seg_angle(P[0], P[1])
+            a2 = _seg_angle(P[3], P[2])
+            d = abs(a1 - a2) % 180
+            d = min(d, 180 - d)
+            metrics["v_converge"] = d
+            if d > tol_deg:
+                issues.append({"code": "convergence", "level": "warn",
+                               "msg": "%s：竖边汇聚 %.2f°（容差 %.1f°）"
+                                      % (sub.get("name", ""), d, tol_deg)})
+        # 边沿倾斜: 上下边相对水平
+        for nm, a, b in (("上边", P[3], P[2]), ("下边", P[0], P[1])):
+            if a and b:
+                ht = abs(_seg_angle(a, b))
+                ht = min(ht, 180 - ht)
+                if ht > tol_deg:
+                    issues.append({"code": "h_tilt", "level": "warn",
+                                   "msg": "%s：%s倾斜 %.2f°"
+                                          % (sub.get("name", ""), nm, ht)})
+                    metrics.setdefault("h_tilt", 0.0)
+                    metrics["h_tilt"] = max(metrics["h_tilt"], ht)
+
+    # 边缘放大率: 折线各有效顶点处放大率的最大相对差 %
+    ms = [m for m in proj.get("scales", []) if m is not None]
+    if len(ms) >= 2:
+        spread = (max(ms) - min(ms)) / max(ms) * 100.0
+        metrics["mag_spread"] = spread
+        if spread > tol_deg:
+            issues.append({"code": "mag", "level": "warn",
+                           "msg": "%s：边缘放大率差 %.1f%%（%.3f–%.3f，容差 %.1f%%）"
+                                  % (sub.get("name", ""), spread,
+                                     min(ms), max(ms), tol_deg)})
+    return {"issues": issues, "metrics": metrics}
+
+
+def ground_glass(state, p_R, R, p_F, L, f, w, h, ic_r):
+    """毛玻璃: 主体片上投影、逐对象指标、像场圈椭圆、汇总。"""
+    n_L, u_L, r_L = L
+    tol = float(state.get("comp", {}).get("persp_tol", 2.0))
+    margin = float(state.get("comp", {}).get("keep_margin", 8.0))
+    subjects = state.get("subjects") or []
+    out = []
+    all_issues = []
+    min_margin = None
+    max_persp = 0.0
+    viol = 0
+    for k, sub in enumerate(subjects):
+        Qs = subject_world_points(sub)
+        proj = project_poly(Qs, p_R, R, p_F, n_L, f, w, h)
+        ana = analyze_subject(sub, proj, tol, margin, w, h)
+        segs_flat = [[[round(s, 3), round(t, 3)] for s, t in seg] for seg in proj["segs"]]
+        verts_flat = [None if v is None else [round(v[0], 3), round(v[1], 3)]
+                      for v in proj["verts"]]
+        rec = {"id": sub.get("id", k + 1), "name": sub.get("name", ""),
+               "type": sub.get("type", "vline"), "must_keep": bool(sub.get("must_keep")),
+               "segs": segs_flat, "verts": verts_flat,
+               "clipped": proj["clipped"], "metrics": ana["metrics"],
+               "issues": ana["issues"]}
+        out.append(rec)
+        if ana["issues"]:
+            viol += 1
+        for it in ana["issues"]:
+            e = dict(it)
+            e["subject_id"] = rec["id"]
+            all_issues.append(e)
+        em = ana["metrics"].get("edge_margin")
+        if em is not None:
+            min_margin = em if min_margin is None else min(min_margin, em)
+        for key in ("convergence", "h_tilt", "v_converge", "keystone", "mag_spread"):
+            if key in ana["metrics"]:
+                max_persp = max(max_persp, ana["metrics"][key])
+    ell = _fit_ellipse_from_pose(p_R, R, p_F, n_L, u_L, r_L, ic_r)
+    return {"film_w": w, "film_h": h, "keep_margin": margin, "persp_tol": tol,
+            "ic_ellipse": ell, "subjects": out, "issues": all_issues,
+            "violations": viol, "min_margin": min_margin, "max_persp": max_persp}
+
+
+def _fit_ellipse_from_pose(p_R, R, p_F, n_L, u_L, r_L, ic_r):
+    """像场锥边界光线与片平面交线椭圆(采样拟合)。"""
+    n_R = R[0]
+    e_ax = -vdot(vsub(p_R, p_F), n_L)
+    tan_rho = ic_r / max(e_ax, 1e-6)
+    rho = math.atan(tan_rho)
+    pts = []
+    for i in range(96):
+        a2 = 2 * math.pi * i / 96
+        dirv = vadd(vscl(n_L, -math.cos(rho)),
+                    vadd(vscl(u_L, math.sin(rho) * math.cos(a2)),
+                         vscl(r_L, math.sin(rho) * math.sin(a2))))
+        denom = vdot(dirv, n_R)
+        if abs(denom) < 1e-12:
+            continue
+        tt = -vdot(vsub(p_F, p_R), n_R) / denom
+        if tt < -1e4 or tt > 1e6:
+            continue
+        X = vadd(p_F, vscl(dirv, tt))
+        s = vdot(vsub(X, p_R), R[2])
+        t = vdot(vsub(X, p_R), R[1])
+        if abs(s) < 1e5 and abs(t) < 1e5:
+            pts.append((s, t))
+    if len(pts) < 12:
+        return None
+    return _fit_ellipse(pts)
 
 
 # ---------------- 碰撞: 板件网格最小间距 ----------------
@@ -434,6 +748,14 @@ def compute(state, do_blur=True):
              "构图点越出片幅：%s" % "、".join(r["name"] for r in comp_bad),
              {"points": [r["name"] for r in comp_bad]})
 
+    # 毛玻璃(片平面投影 + 构图指标)
+    gg = ground_glass(state, p_R, R, p_F, L, f, w, h, ic_r)
+    for it in gg["issues"]:
+        if it["code"] in ("clip", "margin", "virtual"):
+            warn("gg_" + it["code"], it["level"],
+                 "subject:%s" % it.get("subject_id", ""), it["msg"],
+                 {"subject_id": it.get("subject_id")})
+
     # 视图几何
     views = build_views(state, p_R, R, p_F, L, n_s, d_s, wedges,
                         hinge, scheim, corners, ic_r, e_opt, f)
@@ -451,6 +773,7 @@ def compute(state, do_blur=True):
         "ic_min_margin": min(ic_margins),
         "max_blur": max_blur,
         "min_clearance": min_clear,
+        "ground_glass": gg,
         "warnings": warnings,
         "views": views,
     }
@@ -507,6 +830,9 @@ def build_views(state, p_R, R, p_F, L, n_s, d_s, wedges, hinge, scheim,
     xs = [0, p_R[0], p_F[0]] + [p["x"] for p in state["points"]]
     ys = [p_R[1], p_F[1]] + [p["y"] for p in state["points"]]
     zs = [p_R[2], p_F[2]] + [p["z"] for p in state["points"]]
+    for sub in state.get("subjects") or []:
+        for q in sub.get("pts", []):
+            xs.append(q[0]); ys.append(q[1]); zs.append(q[2])
     pad_x = max(80, (max(xs) - min(xs)) * 0.08)
     side_win = {"xmin": min(xs) - 60, "xmax": max(xs) + pad_x,
                 "zmin": min(zs) - 220, "zmax": max(zs) + 220}
@@ -570,10 +896,29 @@ def build_views(state, p_R, R, p_F, L, n_s, d_s, wedges, hinge, scheim,
             "points": [{"x": p["x"], "y": p["y"], "z": p["z"],
                         "kind": p.get("kind", "focus"), "name": p.get("name", "")}
                        for p in state["points"]],
+            "subjects": view_subjects(state, view),
             "rear_normal": pack(R[0]), "front_normal": pack(L[0]),
         }
         views[view] = v
     return views
+
+
+def view_subjects(state, view):
+    """勾线主体投到侧视/俯视的折线与端点(端点携带所属主体/点序, 供拖拽)。"""
+    out = []
+    for sub in state.get("subjects") or []:
+        if sub.get("type") == "rect":
+            cs = rect_corners(sub)
+            poly = cs + [cs[0]]
+        else:
+            poly = [list(q) for q in sub["pts"]]
+        verts = [{"x": q[0], "y": q[1], "z": q[2]} for q in poly]
+        # 端点(非闭合重复点)
+        ends = verts[:-1] if sub.get("type") == "rect" else verts
+        out.append({"id": sub.get("id"), "type": sub.get("type"),
+                    "name": sub.get("name", ""), "must_keep": bool(sub.get("must_keep")),
+                    "poly": verts, "ends": ends})
+    return out
 
 
 # ---------------- 平面拟合(>=3 点) ----------------
@@ -812,10 +1157,19 @@ def search(state, opts=None):
     rng = opts.get("angle_range", cam["max_tilt"])
     comp_locked = locks.get("composition", False)
 
-    # 目标平面族
-    planes = _candidate_planes(fpts)
-    if planes is None:
-        return {"error": "对焦点无法确定有效平面"}
+    # 锁定焦平面: 只用当前共轭焦平面, 不再扫描平面族
+    if locks.get("focus_plane"):
+        cur = compute(state, do_blur=False)
+        sp = cur["subject_plane"]
+        n0, d0 = sp["n"], sp["d"]
+        if vdot(n0, [-1, 0, 0]) <= 0:
+            n0, d0 = vscl(n0, -1), -d0
+        planes = [(n0, d0)]
+    else:
+        # 目标平面族
+        planes = _candidate_planes(fpts)
+        if planes is None:
+            return {"error": "对焦点无法确定有效平面"}
 
     base_pose = pose
     results = []
@@ -859,6 +1213,17 @@ def search(state, opts=None):
                 else:
                     hard = False
                 cost = movement_cost(pose, cand)
+                gg = res.get("ground_glass") or {}
+                # 越界项: 硬警告数 + 必留主体裁切/留边/虚像违规
+                oob = sum(1 for w in res["warnings"]
+                          if w["code"] in ("collision", "bellows_min", "bellows_max",
+                                           "rail", "rail_rear", "image_circle"))
+                for s in gg.get("subjects", []):
+                    if s.get("must_keep") and any(it["code"] in ("clip", "margin", "virtual")
+                                                  for it in s["issues"]):
+                        oob += 1
+                if comp_locked and any(w["code"] == "composition" for w in res["warnings"]):
+                    oob += 1
                 results.append({
                     "pose": cand,
                     "max_blur": res["max_blur"],
@@ -867,13 +1232,21 @@ def search(state, opts=None):
                     "extension": res["extension"],
                     "hard_warn": hard,
                     "warnings": len(res["warnings"]),
+                    "oob": oob,
+                    "max_persp": gg.get("max_persp", 0.0),
+                    "crop_margin": gg.get("min_margin") if gg.get("min_margin") is not None
+                                   else -9999.0,
                     "hinge": res["hinge"],
                     "subject_plane": res["subject_plane"],
                     "wedges": res["wedges"],
                     "views": res["views"],
+                    "ground_glass": gg,
                 })
-    results.sort(key=lambda r: (round(r["max_blur"], 4), r["hard_warn"], r["warnings"],
-                                -round(r["ic_margin"], 2), round(r["cost"], 2)))
+    # 排序: 越界项 → 最大透视误差 → 裁切余量(大优先) → 调整幅度;
+    # 虚焦(模糊圆)作为可行性前提已过滤, hard 警告纳入越界项
+    results.sort(key=lambda r: (r["oob"], round(r["max_persp"], 3),
+                                -round(r["crop_margin"], 2), round(r["cost"], 2),
+                                round(r["max_blur"], 4)))
     return {"candidates": results[:40]}
 
 
