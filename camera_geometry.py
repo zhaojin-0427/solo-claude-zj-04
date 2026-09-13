@@ -444,17 +444,22 @@ def analyze_subject(sub, proj, tol_deg, margin, w, h):
                 issues.append({"code": "convergence", "level": "warn",
                                "msg": "%s：竖边汇聚 %.2f°（容差 %.1f°）"
                                       % (sub.get("name", ""), d, tol_deg)})
-        # 边沿倾斜: 上下边相对水平
+        # 横边倾斜: 上/下边相对水平, 取较大者; 指标始终给出, 超容差才报异常
+        h_tilt = 0.0
+        h_worst = ""
         for nm, a, b in (("上边", P[3], P[2]), ("下边", P[0], P[1])):
             if a and b:
                 ht = abs(_seg_angle(a, b))
                 ht = min(ht, 180 - ht)
-                if ht > tol_deg:
-                    issues.append({"code": "h_tilt", "level": "warn",
-                                   "msg": "%s：%s倾斜 %.2f°"
-                                          % (sub.get("name", ""), nm, ht)})
-                    metrics.setdefault("h_tilt", 0.0)
-                    metrics["h_tilt"] = max(metrics["h_tilt"], ht)
+                if ht > h_tilt:
+                    h_tilt, h_worst = ht, nm
+        if P[0] and P[1]:
+            metrics["h_tilt"] = h_tilt
+            if h_tilt > tol_deg:
+                issues.append({"code": "h_tilt", "level": "warn",
+                               "msg": "%s：%s倾斜 %.2f°（容差 %.1f°）"
+                                      % (sub.get("name", ""), h_worst or "横边",
+                                         h_tilt, tol_deg)})
 
     # 边缘放大率: 折线各有效顶点处放大率的最大相对差 %
     ms = [m for m in proj.get("scales", []) if m is not None]

@@ -101,6 +101,19 @@ gg5b = cg.compute(st5b)["ground_glass"]
 rectb = [s for s in gg5b["subjects"] if s["must_keep"]][0]
 assert any(i["code"] == "margin" and i["level"] == "critical" for i in rectb["issues"])
 
+# 横边倾斜指标必须持续返回, 与容差/是否报异常无关: 同一姿态仅改容差
+st_t2 = cg.default_state()
+st_t2["comp"]["persp_tol"] = 2.0
+ht_low = [s for s in cg.compute(st_t2)["ground_glass"]["subjects"]
+          if s["type"] == "rect"][0]["metrics"]["h_tilt"]
+st5c = cg.default_state()
+st5c["comp"]["persp_tol"] = 90.0
+gg5c = cg.compute(st5c)["ground_glass"]
+rectc = [s for s in gg5c["subjects"] if s["type"] == "rect"][0]
+assert "h_tilt" in rectc["metrics"], rectc["metrics"]
+assert abs(rectc["metrics"]["h_tilt"] - ht_low) < 1e-9
+assert not any(i["code"] == "h_tilt" for i in rectc["issues"])  # 容差内不报异常
+
 # 6) 倾斜后组: 像场圈为椭圆, 竖线出现汇聚
 st6 = cg.default_state()
 st6["pose"]["rear"]["tilt"] = 6.0

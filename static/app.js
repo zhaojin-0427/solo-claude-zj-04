@@ -447,18 +447,23 @@ function viewTransform(kind, rect) {
   const xmin = win.xmin, xmax = win.xmax;
   const vmin = kind === "side" ? win.zmin : win.ymin;
   const vmax = kind === "side" ? win.zmax : win.ymax;
+  // preserveAspectRatio="xMidYMid meet": 等比缩放并在元素内居中,
+  // 元素与 viewBox 画布之间可能有双向留白
   const meet = Math.min(rect.width / W, rect.height / H);
+  const offX = (rect.width - W * meet) / 2;
+  const offY = (rect.height - H * meet) / 2;
   const sc = Math.min((W - 2 * PAD) / (xmax - xmin), (H - 2 * PAD) / (vmax - vmin));
   const ox = PAD + ((W - 2 * PAD) - (xmax - xmin) * sc) / 2;
   const oy = PAD + ((H - 2 * PAD) - (vmax - vmin) * sc) / 2;
-  return { xmin, vmin, ox, oy, sc, meet, pxPerUnit: meet * sc };
+  return { xmin, vmin, ox, oy, sc, meet, offX, offY, pxPerUnit: meet * sc };
 }
 
 function screenToWorld(svgEl, kind, cx, cy) {
   const rect = svgEl.getBoundingClientRect();
   const T = viewTransform(kind, rect);
-  const vx = (cx - rect.left) / T.meet;
-  const vy = (cy - rect.top) / T.meet;
+  // 先扣除 meet 居中留白, 再从像素换回到 viewBox(800×600)坐标
+  const vx = (cx - rect.left - T.offX) / T.meet;
+  const vy = (cy - rect.top - T.offY) / T.meet;
   const x = T.xmin + (vx - T.ox) / T.sc;
   const v = T.vmin + (600 - vy - T.oy) / T.sc;
   return { x, v };
