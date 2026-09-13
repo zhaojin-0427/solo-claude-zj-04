@@ -50,19 +50,27 @@ function bindExpOnce() {
     const id = parseInt(e.target.value, 10);
     if (id) selectSheet(id);
   };
-  // 锁定复选框
+  // 锁定复选框: 两种锁定互斥, 后勾选的生效并取消另一个
   $("lkAperture").onchange = (e) => {
     if (!editable()) { e.target.checked = EXP.current.setup.lock.aperture; return; }
     EXP.current.setup.lock.aperture = e.target.checked;
-    if (e.target.checked && !EXP.current.setup.selection.shutter)
-      EXP.current.setup.selection.shutter = EXP.current.result.selected.shutter;
+    if (e.target.checked) {
+      EXP.current.setup.lock.shutter = false;
+      $("lkShutter").checked = false;
+      if (!EXP.current.setup.selection.shutter)
+        EXP.current.setup.selection.shutter = EXP.current.result.selected.shutter;
+    }
     scheduleRecalc();
   };
   $("lkShutter").onchange = (e) => {
     if (!editable()) { e.target.checked = EXP.current.setup.lock.shutter; return; }
     EXP.current.setup.lock.shutter = e.target.checked;
-    if (e.target.checked && !EXP.current.setup.selection.shutter)
-      EXP.current.setup.selection.shutter = EXP.current.result.selected.shutter;
+    if (e.target.checked) {
+      EXP.current.setup.lock.aperture = false;
+      $("lkAperture").checked = false;
+      if (!EXP.current.setup.selection.shutter)
+        EXP.current.setup.selection.shutter = EXP.current.result.selected.shutter;
+    }
     scheduleRecalc();
   };
   // 刻度尺拖动
@@ -165,8 +173,10 @@ async function confirmSheet() {
   const c = EXP.current;
   if (!c || c.status !== "draft") return;
   if (!confirm("确认测算单？确认后冻结来源方案、修正项与选定组合。")) return;
+  clearTimeout(EXP.saveTimer);            // 取消挂起的自动保存
   const r = await apiX(`/api/exposure/sheets/${c.id}/confirm`, "POST", { setup: c.setup });
   if (r.error) { flash(r.error); return; }
+  c.status = "confirmed";                 // 本地同步, 阻止 selectSheet 前的多余 PUT
   flash("已确认，组合与修正项已冻结");
   await loadExpSheets(c.id);
 }
@@ -174,8 +184,10 @@ async function confirmSheet() {
 async function shootSheet() {
   const c = EXP.current;
   if (!c || c.status !== "confirmed") return;
+  clearTimeout(EXP.saveTimer);
   const r = await apiX(`/api/exposure/sheets/${c.id}/shoot`, "POST");
   if (r.error) { flash(r.error); return; }
+  c.status = "shot";
   flash("已标记拍摄，测算单转为只读");
   await loadExpSheets(c.id);
 }
@@ -191,6 +203,7 @@ async function deleteSheet() {
   const c = EXP.current;
   if (!c) return;
   if (!confirm(`删除测算单 #${c.id}「${c.name}」？`)) return;
+  clearTimeout(EXP.saveTimer);
   await apiX(`/api/exposure/sheets/${c.id}`, "DELETE");
   EXP.current = null;
   await loadExpSheets();
@@ -361,6 +374,12 @@ async function recalcExp() {
   if (EXP.current !== c) return;
   if (out.error) { flash(out.error); return; }
   c.result = out;
+  // 后端清洗(如锁定互斥)后回写, 保证勾选状态与实际约束一致
+  if (out.setup && out.setup.lock) {
+    c.setup.lock = out.setup.lock;
+    $("lkAperture").checked = !!c.setup.lock.aperture;
+    $("lkShutter").checked = !!c.setup.lock.shutter;
+  }
   renderExpResult();
 }
 
@@ -582,25 +601,45 @@ function drawTimeline() {
     const x = xOf(b.t_actual);
     el("circle", { cx: x, cy: base, r: 3, fill: b.in_range && !b.over_max ? "#c084fc" : "#ef6a5e" }, svg);
   }
-  // 最长曝光
-  const xm = xOf(s.max_exposure);
-  el("line", { x1: xm, y1: 14, x2: xm, y2: base, stroke: "#ef6a5e", "stroke-width": 1.5, "stroke-dasharray": "4 2" }, svg);
-  const tm = el("text", { x: xm, y: 12, fill: "#ef6a5e", "font-size": 9, "text-anchor": "middle" }, svg);
-  tm.textContent = "最长";
-  // 三个里程碑
+  // 里程碑标记(含最长曝光): 数值接近时标签自动向上错层, 偏移时画引线
   const marks = [
-    [sel.t_meter, "#4aa8ff", "测光", fmtT(sel.t_meter)],
-    [sel.t_target, "#e8b04b", "皮腔+滤镜", fmtT(sel.t_target)],
-    [sel.t_actual, "#4cc38a", "实际(倒易律)", fmtT(sel.t_actual)],
+    [sel.t_meter, "#4aa8ff", "测光", fmtT(sel.t_meter), false],
+    [sel.t_target, "#e8b04b", "皮腔+滤镜", fmtT(sel.t_target), false],
+    [sel.t_actual, "#4cc38a", "实际(倒易律)", fmtT(sel.t_actual), false],
+    [s.max_exposure, "#ef6a5e", "最长", fmtT(s.max_exposure), true],
   ];
-  marks.forEach(([t, col, lab, val], i) => {
-    const x = xOf(t);
-    const y = 34 - i * 0;   // 同一高度, 标签错列由文本宽度自然分开
-    el("line", { x1: x, y1: 18, x2: x, y2: base - 6, stroke: col, "stroke-width": 1.6 }, svg);
-    el("polygon", { points: `${x},${base - 8} ${x - 4},${base - 2} ${x + 4},${base - 2}`, fill: col }, svg);
-    const tx = el("text", { x, y: 14 + (i === 1 ? 0 : 0), fill: col, "font-size": 9, "text-anchor": "middle" }, svg);
-    tx.textContent = `${lab} ${val}`;
-  });
+  const LINE_TOP = 34;                 // 竖线顶端, 上方留三层标签位
+  // 估算文本宽度(font-size 9): 中文 ~9.5px, 其余 ~5.2px
+  const tw = (s) => { let w = 0; for (const ch of s) w += ch.charCodeAt(0) > 255 ? 9.5 : 5.2; return w; };
+  const layerY = [31, 20, 9];          // 第一层贴近线顶, 向上错层
+  const occ = [[], [], []];
+  const items = marks.map(([t, col, lab, val, dashed]) => {
+    const txt = `${lab} ${val}`;
+    const w = tw(txt);
+    // 标签位置防出界
+    const x = Math.max(6 + w / 2, Math.min(VW - 6 - w / 2, xOf(t)));
+    return { t, col, txt, w, x, dashed, y: layerY[0] };
+  }).sort((a, b) => a.x - b.x);
+  for (const m of items) {
+    let li = 0;
+    while (li < layerY.length - 1 &&
+           occ[li].some(([a, b]) => m.x - m.w / 2 - 4 < b && m.x + m.w / 2 + 4 > a)) li++;
+    occ[li].push([m.x - m.w / 2, m.x + m.w / 2]);
+    m.y = layerY[li];
+  }
+  for (const m of items) {
+    const xLine = xOf(m.t);   // 竖线画在真实数值位置
+    el("line", { x1: xLine, y1: LINE_TOP, x2: xLine, y2: m.dashed ? base : base - 6,
+      stroke: m.col, "stroke-width": 1.6,
+      "stroke-dasharray": m.dashed ? "4 2" : "none" }, svg);
+    if (!m.dashed)
+      el("polygon", { points: `${xLine},${base - 8} ${xLine - 4},${base - 2} ${xLine + 4},${base - 2}`, fill: m.col }, svg);
+    if (m.y < layerY[0] || Math.abs(m.x - xLine) > 2)
+      el("line", { x1: m.x, y1: m.y + 2, x2: xLine, y2: LINE_TOP - 1, stroke: m.col,
+        "stroke-width": 0.8, "stroke-dasharray": "2 2" }, svg);
+    const tx = el("text", { x: m.x, y: m.y, fill: m.col, "font-size": 9, "text-anchor": "middle" }, svg);
+    tx.textContent = m.txt;
+  }
   // 选定快门
   const xs = xOf(sel.shutter);
   el("polygon", { points: `${xs},${base + 16} ${xs - 5},${base + 24} ${xs + 5},${base + 24}`, fill: "#fff" }, svg);

@@ -158,6 +158,23 @@ assert out["geometry"]["ground_glass"]["film_w"] == ST["camera"]["film_w"]
 assert any(p["blur"] is not None for p in out["geometry"]["points"])
 print("11 几何联动 OK")
 
+# 11b) 锁定互斥: 同时提交双锁, 清洗后快门锁定生效、光圈锁定被清除
+setup = ex.default_setup(ST)
+setup["lock"] = {"shutter": True, "aperture": True}
+setup["selection"]["shutter"] = 0.5
+cleaned = ex.clean_setup(setup, ST)
+assert cleaned["lock"]["shutter"] and not cleaned["lock"]["aperture"]
+out = ex.calc(ST, setup)
+assert out["selected"]["mode"] == "lock_shutter"
+assert not out["setup"]["lock"]["aperture"]
+# 单锁光圈不受影响
+setup["lock"] = {"shutter": False, "aperture": True}
+cleaned = ex.clean_setup(setup, ST)
+assert cleaned["lock"]["aperture"] and not cleaned["lock"]["shutter"]
+out = ex.calc(ST, setup)
+assert out["selected"]["mode"] == "manual"
+print("11b 锁定互斥 OK")
+
 # ---------------- API 状态机 ----------------
 import app as web
 

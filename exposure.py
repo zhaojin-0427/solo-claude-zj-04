@@ -114,6 +114,10 @@ def clean_setup(setup, state):
     lk = setup.get("lock") or {}
     out["lock"] = {"shutter": bool(lk.get("shutter")),
                    "aperture": bool(lk.get("aperture"))}
+    # 两种锁定互斥: 锁定快门会反算并改写光圈, 与锁定光圈矛盾;
+    # 同时提交时快门锁定生效(与前端"后勾选的生效"一致), 清掉光圈锁定
+    if out["lock"]["shutter"]:
+        out["lock"]["aperture"] = False
     sel = setup.get("selection") or {}
     ap = sel.get("aperture")
     shut = sel.get("shutter")
