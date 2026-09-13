@@ -1035,6 +1035,7 @@ function bindHeader() {
   $("btnSave").onclick = savePlan;
   $("btnPlans").onclick = togglePlans;
   $("btnCard").onclick = openCard;
+  $("btnExposure").onclick = () => openExposure();
 }
 
 async function doSearch() {

@@ -12,6 +12,7 @@
   <button id="btnRefocus" title="重新自动对焦">🎯 对焦</button>
   <button id="btnSearch">🔍 搜索组合</button>
   <button id="btnCard">🧾 调整卡</button>
+  <button id="btnExposure">📸 曝光</button>
   <div class="sp"></div>
   <button id="btnSave" class="primary">保存方案</button>
   <button id="btnPlans">方案库</button>
@@ -189,6 +190,55 @@
 
 <div class="plans-pop" id="plansPop"></div>
 <div class="flash" id="flash"></div>
+
+<!-- 曝光测算单面板 -->
+<div class="exp-overlay" id="expOverlay" style="display:none">
+  <div class="exp-head">
+    <b>曝光测算单</b>
+    <select id="expSheetSel" title="选择测算单"></select>
+    <button id="expNew">＋ 新建</button>
+    <button id="expDup" title="复制为新草稿（已拍摄单复制后才能调整）">⧉ 复制</button>
+    <button id="expDel" class="ghost danger">删除</button>
+    <span class="exp-status" id="expStatus"></span>
+    <div class="sp"></div>
+    <button id="expConfirm" class="primary">✔ 确认</button>
+    <button id="expShoot">🎬 已拍摄</button>
+    <button id="expClose" class="ghost">✕ 关闭</button>
+  </div>
+  <div class="exp-body">
+    <aside class="exp-left" id="expForm"></aside>
+    <div class="exp-mid">
+      <div class="exp-chain" id="expChain"></div>
+      <div class="exp-block">
+        <div class="exp-btitle">光圈刻度（拖动选用，<label class="exp-lk"><input type="checkbox" id="lkAperture">锁定</label>）</div>
+        <svg id="apScale" viewBox="0 0 640 74" preserveAspectRatio="none"></svg>
+      </div>
+      <div class="exp-block">
+        <div class="exp-btitle">快门刻度（拖动选用，<label class="exp-lk"><input type="checkbox" id="lkShutter">锁定后反算光圈</label>）</div>
+        <svg id="shScale" viewBox="0 0 640 74" preserveAspectRatio="none"></svg>
+      </div>
+      <div class="exp-block">
+        <div class="exp-btitle">曝光时间轴（测光 → 皮腔/滤镜 → 倒易律 → 实际曝光）</div>
+        <svg id="expTimeline" viewBox="0 0 640 96" preserveAspectRatio="none"></svg>
+      </div>
+      <div class="exp-block exp-wedgeblk">
+        <div class="exp-btitle">景深楔形（当前光圈，侧视）</div>
+        <svg id="expWedge" viewBox="0 0 640 240" preserveAspectRatio="xMidYMid meet"></svg>
+      </div>
+      <div class="exp-warns" id="expWarns"></div>
+    </div>
+    <aside class="exp-right">
+      <div class="exp-rtitle">等效快门—光圈组合（点击选用）</div>
+      <div class="exp-combos" id="expCombos"></div>
+      <div class="exp-rtitle">包围序列</div>
+      <div class="exp-brackets" id="expBrackets"></div>
+      <div class="exp-rtitle">当前毛玻璃（冻结机位）</div>
+      <svg id="expGG" viewBox="0 0 300 250" preserveAspectRatio="xMidYMid meet"></svg>
+    </aside>
+  </div>
+</div>
+
 <script src="/static/app.js"></script>
+<script src="/static/exposure.js"></script>
 </body>
 </html>

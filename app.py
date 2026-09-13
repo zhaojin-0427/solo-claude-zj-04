@@ -11,6 +11,7 @@ import time
 from flask import Flask, g, jsonify, request, send_from_directory
 
 import camera_geometry as cg
+import exposure as ex
 
 BASE = os.path.dirname(os.path.abspath(__file__))
 DB_PATH = os.path.join(BASE, "workbench.db")
@@ -43,6 +44,18 @@ def init_db():
             created_at REAL,
             updated_at REAL,
             state_json TEXT NOT NULL,
+            result_json TEXT
+        )"""
+    )
+    conn.execute(
+        """CREATE TABLE IF NOT EXISTS exposure_sheets (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'draft',
+            plan_id INTEGER,
+            created_at REAL,
+            updated_at REAL,
+            setup_json TEXT NOT NULL,
             result_json TEXT
         )"""
     )
@@ -221,6 +234,179 @@ def _brief(result):
         "crop_margin": gg.get("min_margin"),
         "gg_violations": gg.get("violations"),
     }
+
+
+# ---------------- 曝光测算单 ----------------
+STATUS_FLOW = {"draft": "草稿", "confirmed": "已确认", "shot": "已拍摄"}
+
+
+@app.route("/api/exposure/presets")
+def api_exposure_presets():
+    return jsonify({
+        "shutter_stops": [[lab, t] for lab, t in ex.SHUTTER_STOPS],
+        "recip_presets": {k: {"name": v["name"], "points": v["points"]}
+                          for k, v in ex.RECIP_PRESETS.items()},
+    })
+
+
+@app.route("/api/exposure/calc", methods=["POST"])
+def api_exposure_calc():
+    """实时试算(不落库): 前端拖动刻度时调用。"""
+    payload = request.get_json(force=True, silent=True) or {}
+    state = _clean_state(payload.get("state") or {})
+    state = ex.freeze_state(state)
+    setup = ex.clean_setup(payload.get("setup"), state)
+    t0 = time.time()
+    out = ex.calc(state, setup)
+    out["elapsed_ms"] = round((time.time() - t0) * 1000, 1)
+    return jsonify(out)
+
+
+def _sheet_brief(row):
+    setup = json.loads(row["setup_json"])
+    result = json.loads(row["result_json"] or "null")
+    sel = (result or {}).get("selected") or {}
+    return {"id": row["id"], "name": row["name"], "status": row["status"],
+            "status_label": STATUS_FLOW.get(row["status"], row["status"]),
+            "plan_id": row["plan_id"],
+            "created_at": row["created_at"], "updated_at": row["updated_at"],
+            "iso": (setup.get("setup") or {}).get("iso"),
+            "selected": {"aperture": sel.get("aperture"),
+                         "shutter_label": sel.get("shutter_label"),
+                         "ev_err": sel.get("ev_err")} if sel else None}
+
+
+@app.route("/api/exposure/sheets", methods=["GET", "POST"])
+def api_exposure_sheets():
+    conn = db()
+    if request.method == "POST":
+        data = request.get_json(force=True, silent=True) or {}
+        name = (data.get("name") or "曝光测算单").strip()[:80]
+        plan_id = data.get("plan_id")
+        # 建单: 从已保存方案(或提交的当前状态)冻结机位
+        if plan_id:
+            prow = conn.execute("SELECT * FROM plans WHERE id=?",
+                                (int(plan_id),)).fetchone()
+            if prow is None:
+                return jsonify({"error": "来源方案不存在"}), 404
+            state = json.loads(prow["state_json"])
+        else:
+            state = _clean_state(data.get("state") or {})
+            if state["pose"].get("focus_mode", "auto") == "auto":
+                cg.autofocus(state)
+            plan_id = None
+        state = ex.freeze_state(state)
+        setup = ex.clean_setup(data.get("setup"), state)
+        now = time.time()
+        cur = conn.execute(
+            "INSERT INTO exposure_sheets(name,status,plan_id,created_at,updated_at,"
+            "setup_json,result_json) VALUES(?,?,?,?,?,?,NULL)",
+            (name, "draft", plan_id, now, now,
+             json.dumps({"state": state, "setup": setup}, ensure_ascii=False)))
+        conn.commit()
+        return jsonify({"id": cur.lastrowid})
+    rows = conn.execute(
+        "SELECT * FROM exposure_sheets ORDER BY updated_at DESC").fetchall()
+    return jsonify([_sheet_brief(r) for r in rows])
+
+
+def _get_sheet(conn, sid):
+    return conn.execute("SELECT * FROM exposure_sheets WHERE id=?",
+                        (sid,)).fetchone()
+
+
+@app.route("/api/exposure/sheets/<int:sid>", methods=["GET", "PUT", "DELETE"])
+def api_exposure_sheet(sid):
+    conn = db()
+    row = _get_sheet(conn, sid)
+    if row is None:
+        return jsonify({"error": "测算单不存在"}), 404
+    if request.method == "GET":
+        pack = json.loads(row["setup_json"])
+        out = {"id": row["id"], "name": row["name"], "status": row["status"],
+               "status_label": STATUS_FLOW.get(row["status"], row["status"]),
+               "plan_id": row["plan_id"],
+               "created_at": row["created_at"], "updated_at": row["updated_at"],
+               "state": pack["state"], "setup": pack["setup"],
+               "result": json.loads(row["result_json"] or "null")}
+        # 已确认/已拍摄: 用冻结快照; 草稿: 实时计算
+        if row["status"] == "draft" or out["result"] is None:
+            out["result"] = ex.calc(pack["state"], pack["setup"])
+        return jsonify(out)
+    if request.method == "DELETE":
+        conn.execute("DELETE FROM exposure_sheets WHERE id=?", (sid,))
+        conn.commit()
+        return jsonify({"ok": True})
+    # PUT: 仅草稿可调整; 已确认/已拍摄只读, 需复制后再改
+    if row["status"] != "draft":
+        return jsonify({"error": "已确认/已拍摄的测算单为只读，请复制后再调整"}), 409
+    data = request.get_json(force=True, silent=True) or {}
+    pack = json.loads(row["setup_json"])
+    name = (data.get("name") or row["name"]).strip()[:80]
+    setup = ex.clean_setup(data.get("setup"), pack["state"])
+    conn.execute(
+        "UPDATE exposure_sheets SET name=?,updated_at=?,setup_json=? WHERE id=?",
+        (name, time.time(),
+         json.dumps({"state": pack["state"], "setup": setup},
+                    ensure_ascii=False), sid))
+    conn.commit()
+    return jsonify({"ok": True})
+
+
+@app.route("/api/exposure/sheets/<int:sid>/confirm", methods=["POST"])
+def api_exposure_confirm(sid):
+    """草稿 -> 已确认: 冻结来源方案、修正项与选定组合。"""
+    conn = db()
+    row = _get_sheet(conn, sid)
+    if row is None:
+        return jsonify({"error": "测算单不存在"}), 404
+    if row["status"] != "draft":
+        return jsonify({"error": "仅草稿可确认"}), 409
+    pack = json.loads(row["setup_json"])
+    # 确认时允许先提交一次最终设置
+    data = request.get_json(force=True, silent=True) or {}
+    if data.get("setup"):
+        pack["setup"] = ex.clean_setup(data.get("setup"), pack["state"])
+    result = ex.calc(pack["state"], pack["setup"])
+    conn.execute(
+        "UPDATE exposure_sheets SET status='confirmed',updated_at=?,"
+        "setup_json=?,result_json=? WHERE id=?",
+        (time.time(), json.dumps(pack, ensure_ascii=False),
+         json.dumps(result, ensure_ascii=False), sid))
+    conn.commit()
+    return jsonify({"ok": True, "status": "confirmed"})
+
+
+@app.route("/api/exposure/sheets/<int:sid>/shoot", methods=["POST"])
+def api_exposure_shoot(sid):
+    """已确认 -> 已拍摄(只读)。"""
+    conn = db()
+    row = _get_sheet(conn, sid)
+    if row is None:
+        return jsonify({"error": "测算单不存在"}), 404
+    if row["status"] != "confirmed":
+        return jsonify({"error": "仅已确认的测算单可标记拍摄"}), 409
+    conn.execute("UPDATE exposure_sheets SET status='shot',updated_at=? WHERE id=?",
+                 (time.time(), sid))
+    conn.commit()
+    return jsonify({"ok": True, "status": "shot"})
+
+
+@app.route("/api/exposure/sheets/<int:sid>/duplicate", methods=["POST"])
+def api_exposure_duplicate(sid):
+    """复制为新草稿(已拍摄单复制后才能调整)。"""
+    conn = db()
+    row = _get_sheet(conn, sid)
+    if row is None:
+        return jsonify({"error": "测算单不存在"}), 404
+    now = time.time()
+    cur = conn.execute(
+        "INSERT INTO exposure_sheets(name,status,plan_id,created_at,updated_at,"
+        "setup_json,result_json) VALUES(?,?,?,?,?,?,NULL)",
+        ((row["name"] + " 副本")[:80], "draft", row["plan_id"], now, now,
+         row["setup_json"]))
+    conn.commit()
+    return jsonify({"id": cur.lastrowid})
 
 
 if __name__ == "__main__":
