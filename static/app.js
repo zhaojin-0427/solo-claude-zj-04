@@ -11,6 +11,13 @@ let flashTimer = null;
 const $ = (id) => document.getElementById(id);
 const NS = "http://www.w3.org/2000/svg";
 
+// SVG presentation 属性对 CSS 变量支持不一致, 这里用具体色值
+const C = {
+  grid: "#2a2f3a", rear: "#6ea8fe", front: "#ffb454",
+  plane: "#4cc38a", wedge: "rgba(76,195,138,0.14)",
+  hinge: "#e879f9", bad: "#ef6a5e", accent: "#4aa8ff",
+};
+
 function el(tag, attrs, parent) {
   const e = document.createElementNS(NS, tag);
   for (const k in (attrs || {})) {
@@ -224,14 +231,14 @@ function drawView(svgId, kind) {
   const gGrid = el("g", {}, svg);
   for (let x = Math.ceil(xmin / 500) * 500; x <= xmax; x += 500) {
     el("line", { x1: X(x), y1: PAD, x2: X(x), y2: H - PAD,
-      stroke: "var(--grid)", "stroke-width": 1 }, gGrid);
-    const t = el("text", { x: X(x), y: H - PAD + 16, fill: "#67708",
+      stroke: C.grid, "stroke-width": 1 }, gGrid);
+    const t = el("text", { x: X(x), y: H - PAD + 16, fill: "#6b7484",
       "font-size": 9, "text-anchor": "middle" }, gGrid);
     t.textContent = x;
   }
   for (let z = Math.ceil(vmin / 500) * 500; z <= vmax; z += 500) {
     el("line", { x1: PAD, y1: V(z), x2: W - PAD, y2: V(z),
-      stroke: "var(--grid)", "stroke-width": 1 }, gGrid);
+      stroke: C.grid, "stroke-width": 1 }, gGrid);
     const t = el("text", { x: 6, y: V(z) + 3, fill: "#6b7484", "font-size": 9 }, gGrid);
     t.textContent = z;
   }
@@ -247,7 +254,7 @@ function drawView(svgId, kind) {
       el("polygon", {
         points: `${P(a[0])[0]},${P(a[0])[1]} ${P(a[1])[0]},${P(a[1])[1]} ` +
                 `${P(b[1])[0]},${P(b[1])[1]} ${P(b[0])[0]},${P(b[0])[1]}`,
-        fill: "var(--wedge)", stroke: "none"
+        fill: C.wedge, stroke: "none"
       }, svg);
     }
     for (const w of v.wedges) {
@@ -259,7 +266,7 @@ function drawView(svgId, kind) {
     // 焦平面
     const [s1, s2] = v.subject_line.map(P);
     el("line", { x1: s1[0], y1: s1[1], x2: s2[0], y2: s2[1],
-      stroke: "var(--plane)", "stroke-width": 2 }, svg);
+      stroke: C.plane, "stroke-width": 2 }, svg);
   }
 
   // 光轴
@@ -293,8 +300,8 @@ function drawView(svgId, kind) {
   if (v.hinge) {
     const [hx, hy] = P(v.hinge);
     if (hx > PAD - 50 && hx < W - PAD + 50 && hy > PAD - 50 && hy < H - PAD + 50) {
-      el("circle", { cx: hx, cy: hy, r: 5, fill: "var(--hinge)" }, svg);
-      const t = el("text", { x: hx + 7, y: hy - 6, fill: "var(--hinge)", "font-size": 10 }, svg);
+      el("circle", { cx: hx, cy: hy, r: 5, fill: C.hinge }, svg);
+      const t = el("text", { x: hx + 7, y: hy - 6, fill: C.hinge, "font-size": 10 }, svg);
       t.textContent = "铰链";
     }
   }
@@ -304,23 +311,23 @@ function drawView(svgId, kind) {
     const [cx2, cy2] = P(cp);
     const info = RESULT.corners[i];
     el("circle", { cx: cx2, cy: cy2, r: 2.5,
-      fill: info.ok ? "#8a93a6" : "var(--bad)" }, svg);
+      fill: info.ok ? "#8a93a6" : C.bad }, svg);
   });
 
   // 前/后组板 + 拖拽热区
-  drawStandard(svg, v.rear, "rear", "var(--rear)", P, kind);
-  drawStandard(svg, v.front, "front", "var(--front)", P, kind);
+  drawStandard(svg, v.rear, "rear", C.rear, P, kind);
+  drawStandard(svg, v.front, "front", C.front, P, kind);
 
   // 对焦点 / 构图点
   v.points.forEach((p, i) => {
     const [px, py] = P(p);
     const info = RESULT.points[i];
     const color = p.kind === "focus"
-      ? (info && info.blur != null && info.blur > STATE.camera.coc ? "var(--bad)" : "var(--plane)")
-      : "var(--accent)";
+      ? (info && info.blur != null && info.blur > STATE.camera.coc ? C.bad : C.plane)
+      : C.accent;
     el("circle", { cx: px, cy: py, r: 5, fill: color, stroke: "#0d0f13",
       "stroke-width": 1.5, class: "hit", "data-drag": "point", "data-i": i }, svg);
-    const t = el("text", { x: px + 8, y: py - 7, fill, "font-size": 10 }, svg);
+    const t = el("text", { x: px + 8, y: py - 7, fill: color, "font-size": 10 }, svg);
     t.textContent = p.name;
   });
 }
